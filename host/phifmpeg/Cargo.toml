@@ -1,0 +1,15 @@
+[package]
+name = "phifmpeg"
+description = "Builds an unmodified FFmpeg for the Xeon Phi 3120 cards and runs it there"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+toml = "0.8"

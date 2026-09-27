@@ -1,0 +1,12 @@
+# Host workspace. The card-side crates (card/) are a separate workspace:
+# they build for the stack's x86_64-knc-linux-musl target with build-std.
+[workspace]
+resolver = "2"
+members = ["host/phifmpeg"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Lasimeri/phifmpeg"
+rust-version = "1.85"

@@ -1,0 +1,13 @@
+# Every download phifmpeg makes, pinned. `phifmpeg fetch` refuses anything
+# that does not match: a clone whose HEAD is not `commit`, a tree with local
+# changes, a tarball whose SHA-256 differs. See docs/pins.md.
+
+[ffmpeg]
+repo = "https://github.com/FFmpeg/FFmpeg.git"
+tag = "n9.0.2"
+commit = "946fcce07b6dcd0331c8cc609192aeff5e1924f8"
+
+[nasm]
+version = "3.02"
+url = "https://www.nasm.us/pub/nasm/releasebuilds/3.02/nasm-3.02.tar.xz"
+sha256 = "87336eba53b4acfe917424ab5d500d2b0054d9f5148d35c2273ccf2cfb712f0d"
