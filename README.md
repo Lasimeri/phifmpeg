@@ -21,11 +21,13 @@ repository builds on that and copies nothing from it.
 | --- | --- |
 | FFmpeg n9.0.2 for the card, C only | builds, ISA audit clean (4.49 M instructions, 0 illegal) |
 | HEVC decode on card 0 | **bit-exact** (300/300 frame hashes match the host); 1080p30 at **29.8 fps** with 228 threads, 25.2 with 114 |
-| FFmpeg with its x86 SIMD, for the translator | builds; 237,185 instructions the card lacks, all in FFmpeg's assembly |
-| `phix` translator (SIMD to the VPU) | designed, not written |
-| encode, two cards, host-facing transcode | not started |
+| x265 4.2 (HEVC encoder) for the card, C only | builds, audit clean; linked into FFmpeg as `libx265` |
+| encode on card 0 (BBB 1080p60, ultrafast) | 3.8 fps per instance, **9.7 fps** with 4 instances; full transcode 3.3 fps per process |
+| FFmpeg and x265 with their x86 SIMD, for the translator | builds; the card lacks those instructions, so they run only through the translator |
+| translator (SIMD to the VPU) | next: x265's SSE2 functions (3x on the host) |
+| both cards, host-facing transcode | not started |
 
-Numbers and how they were checked: [`docs/results/2026-09-27-c-baseline.md`](docs/results/2026-09-27-c-baseline.md).
+Numbers and how they were checked: [decode](docs/results/2026-09-27-c-baseline.md), [encode and the 1080p60 budget](docs/results/2026-09-27-encode-baseline.md).
 How the pieces fit and why: [`docs/design.md`](docs/design.md).
 
 For scale, the same decode on the host: 596 fps with FFmpeg's own SIMD,

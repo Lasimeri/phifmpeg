@@ -9,6 +9,8 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow = "1"
+cpp_demangle = "0.4"
+object = { version = "0.36", default-features = false, features = ["read"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"

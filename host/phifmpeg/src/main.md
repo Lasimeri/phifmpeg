@@ -6,8 +6,9 @@ FFmpeg. Subcommands so far:
 | command | does |
 | --- | --- |
 | `phifmpeg stack` | where the stack, its toolchain, the ISA audit and the build root are |
-| `phifmpeg fetch` | the pinned FFmpeg checkout (verified pristine) and the pinned nasm, built into the build root |
-| `phifmpeg build --variant c\|asm` | FFmpeg for the card with configure flags only, then the stack's ISA audit |
+| `phifmpeg fetch` | the pinned FFmpeg and x265 checkouts (verified pristine) and the pinned nasm, built into the build root |
+| `phifmpeg build --variant c\|asm` | card/phix, x265 and FFmpeg for the card with build flags only, then the stack's ISA audit |
+| `phifmpeg prof <binary> <samples>` | the card profiler's samples (`PHIX_PROF`) as a per-function table |
 
 The repository root is taken from `CARGO_MANIFEST_DIR`, so the binary is
 meant to be run from this checkout (`cargo run -p phifmpeg -- ...` or

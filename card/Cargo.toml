@@ -1,0 +1,19 @@
+# Card workspace: built for the stack's x86_64-knc-linux-musl target with
+# build-std, by `phifmpeg build` (the target spec and the patched LLVM that
+# rustc must load come from the stack, so a plain `cargo build` here builds
+# for the host instead).
+[workspace]
+resolver = "2"
+members = ["phix"]
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+# One object file per crate: the anchor symbol the link flags reference and
+# the constructor must be in the same object, or the linker may keep one
+# without the other.
+codegen-units = 1
+
+[profile.dev]
+panic = "abort"
+codegen-units = 1

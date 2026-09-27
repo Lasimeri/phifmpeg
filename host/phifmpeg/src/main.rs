@@ -9,6 +9,7 @@ mod fetch;
 mod ffbuild;
 mod layout;
 mod pins;
+mod prof;
 mod stack;
 
 use std::path::PathBuf;
@@ -35,6 +36,16 @@ enum Cmd {
     Stack,
     /// Fetch the pinned FFmpeg and build the pinned nasm.
     Fetch,
+    /// Map card profiler samples (PHIX_PROF) to functions.
+    Prof {
+        /// The unstripped binary that ran (ffmpeg_g, x265).
+        elf: PathBuf,
+        /// The samples file PHIX_PROF wrote.
+        samples: PathBuf,
+        /// How many functions to list.
+        #[arg(long, default_value_t = 30)]
+        top: usize,
+    },
     /// Build FFmpeg for the card (configure flags only) and audit it.
     Build {
         /// `c` (no assembly, audited clean) or `asm` (FFmpeg's x86 SIMD in).
@@ -90,9 +101,10 @@ fn real_main() -> Result<()> {
             println!("ffmpeg      {} at {}", pins.ffmpeg.tag, pins.ffmpeg.commit);
         }
         Cmd::Fetch => fetch::fetch(&lay, &pins)?,
+        Cmd::Prof { elf, samples, top } => prof::report(&elf, &samples, top)?,
         Cmd::Build { variant } => {
             let s = Stack::find(&repo)?;
-            let bin = ffbuild::build(&s, &lay, &pins, variant)?;
+            let bin = ffbuild::build(&s, &repo, &lay, &pins, variant)?;
             println!("== built {}", bin.display());
         }
     }

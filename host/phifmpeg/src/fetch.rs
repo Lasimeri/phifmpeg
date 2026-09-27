@@ -1,11 +1,11 @@
-//! `phifmpeg fetch`: the pinned FFmpeg checkout and a host nasm.
+//! `phifmpeg fetch`: the pinned FFmpeg and x265 checkouts and a host nasm.
 //!
-//! FFmpeg is cloned at the pinned tag and must peel to the pinned commit
-//! with no local changes; [`ffmpeg_pristine`] is also the guard every build
-//! runs, so an edited tree can never be built by accident. nasm assembles
-//! FFmpeg's own x86 sources for the `asm` variant; it is built from a
-//! SHA-256-checked tarball into the build root, so nothing is installed on
-//! the host.
+//! FFmpeg and x265 are cloned at their pinned tags and must peel to the
+//! pinned commits with no local changes; [`pristine`] is also the guard
+//! every build runs, so an edited tree can never be built by accident.
+//! nasm assembles FFmpeg's and x265's own x86 sources for the `asm`
+//! variant; it is built from a SHA-256-checked tarball into the build root,
+//! so nothing is installed on the host.
 
 use std::io::Read;
 use std::path::Path;
@@ -15,21 +15,21 @@ use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
 use crate::layout::Layout;
-use crate::pins::Pins;
+use crate::pins::{GitPin, Pins};
 use crate::run;
 
 /// Fetch everything `pins.toml` names.
 pub fn fetch(lay: &Layout, pins: &Pins) -> Result<()> {
-    fetch_ffmpeg(lay, pins)?;
+    fetch_git("ffmpeg", &pins.ffmpeg, &lay.ffmpeg_src())?;
+    fetch_git("x265", &pins.x265, &lay.x265_src())?;
     fetch_nasm(lay, pins)?;
     Ok(())
 }
 
-fn fetch_ffmpeg(lay: &Layout, pins: &Pins) -> Result<()> {
-    let dir = lay.ffmpeg_src();
+fn fetch_git(name: &str, pin: &GitPin, dir: &Path) -> Result<()> {
     if !dir.join(".git").is_dir() {
         std::fs::create_dir_all(dir.parent().unwrap())?;
-        println!("== cloning {} at {}", pins.ffmpeg.repo, pins.ffmpeg.tag);
+        println!("== cloning {} at {}", pin.repo, pin.tag);
         run(Command::new("git")
             .args([
                 "clone",
@@ -37,48 +37,43 @@ fn fetch_ffmpeg(lay: &Layout, pins: &Pins) -> Result<()> {
                 "--depth",
                 "1",
                 "--branch",
-                &pins.ffmpeg.tag,
+                &pin.tag,
                 "-c",
                 "advice.detachedHead=false",
             ])
-            .arg(&pins.ffmpeg.repo)
-            .arg(&dir))?;
+            .arg(&pin.repo)
+            .arg(dir))?;
     }
-    ffmpeg_pristine(lay, pins)?;
-    println!(
-        "== ffmpeg {} at {} (pristine)",
-        pins.ffmpeg.tag,
-        &pins.ffmpeg.commit[..12]
-    );
+    pristine(name, pin, dir)?;
+    println!("== {name} {} at {} (pristine)", pin.tag, &pin.commit[..12]);
     Ok(())
 }
 
 /// The checkout is at the pinned commit and has no changes, tracked or not.
-pub fn ffmpeg_pristine(lay: &Layout, pins: &Pins) -> Result<()> {
-    let dir = lay.ffmpeg_src();
+pub fn pristine(name: &str, pin: &GitPin, dir: &Path) -> Result<()> {
     let head = capture(
         Command::new("git")
             .arg("-C")
-            .arg(&dir)
+            .arg(dir)
             .args(["rev-parse", "HEAD"]),
     )?;
-    if head.trim() != pins.ffmpeg.commit {
+    if head.trim() != pin.commit {
         bail!(
             "{}: HEAD is {} but pins.toml says {}",
             dir.display(),
             head.trim(),
-            pins.ffmpeg.commit
+            pin.commit
         );
     }
     let status = capture(
         Command::new("git")
             .arg("-C")
-            .arg(&dir)
+            .arg(dir)
             .args(["status", "--porcelain"]),
     )?;
     if !status.trim().is_empty() {
         bail!(
-            "{}: the FFmpeg tree has local changes; phifmpeg builds FFmpeg unmodified:\n{}",
+            "{}: the {name} tree has local changes; phifmpeg builds {name} unmodified:\n{}",
             dir.display(),
             status
         );

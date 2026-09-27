@@ -9,6 +9,7 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 pub struct Pins {
     pub ffmpeg: GitPin,
+    pub x265: GitPin,
     pub nasm: TarPin,
 }
 

@@ -35,6 +35,16 @@ impl Layout {
         self.root.join("src/ffmpeg")
     }
 
+    /// The pristine x265 checkout.
+    pub fn x265_src(&self) -> PathBuf {
+        self.root.join("src/x265")
+    }
+
+    /// x265 installed for one variant (`lib/libx265.a`, `include/`, `lib/pkgconfig`).
+    pub fn x265_prefix(&self, variant: &str) -> PathBuf {
+        self.root.join("prefix").join(variant)
+    }
+
     /// Downloaded tarballs.
     pub fn downloads(&self) -> PathBuf {
         self.root.join("downloads")

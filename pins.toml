@@ -11,3 +11,8 @@ commit = "946fcce07b6dcd0331c8cc609192aeff5e1924f8"
 version = "3.02"
 url = "https://www.nasm.us/pub/nasm/releasebuilds/3.02/nasm-3.02.tar.xz"
 sha256 = "87336eba53b4acfe917424ab5d500d2b0054d9f5148d35c2273ccf2cfb712f0d"
+
+[x265]
+repo = "https://bitbucket.org/multicoreware/x265_git.git"
+tag = "4.2"
+commit = "e444744c03978c1fb4e037168967020cf2648427"
