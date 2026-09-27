@@ -4,7 +4,7 @@
 # for the host instead).
 [workspace]
 resolver = "2"
-members = ["phix"]
+members = ["phix", "runner"]
 
 [profile.release]
 panic = "abort"

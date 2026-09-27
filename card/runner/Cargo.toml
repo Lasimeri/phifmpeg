@@ -1,0 +1,11 @@
+[package]
+name = "phifmpeg-card"
+description = "Card-side runner for phifmpeg transcode: encodes the segments put into a job directory, K at a time"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "phifmpeg-card"
+path = "src/main.rs"

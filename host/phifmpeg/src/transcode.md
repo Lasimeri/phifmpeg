@@ -1,0 +1,72 @@
+# transcode.rs
+
+`phifmpeg transcode IN OUT`: one real-time HEVC transcode shared between
+the cards and the host, treating the cards as co-processors: they take
+every segment they can finish in time, the host does the rest.
+
+## Model
+
+1. **Segments.** The input's first video stream is cut at keyframes into
+   segments of about `--segment-seconds` (FFmpeg's segment muxer, stream
+   copy). Each is decoded and encoded independently, so the input needs
+   closed GOPs: with open GOPs (x265's default), the leading pictures of
+   each cut are dropped by the decoder and the frame count comes up short
+   (the count at the end catches it).
+2. **Real time.** A segment becomes available when its last frame would
+   have arrived from a live source, and is due `--latency` seconds after
+   its end time in the video, like a broadcast delay.
+3. **Placement.** On arrival a segment goes to an **idle** card slot whose
+   estimate, times `--card-safety`, plus `--card-overhead`, finishes before
+   the deadline less `--margin`; otherwise to the host. Only idle slots:
+   segments arrive every couple of seconds, so a slot that frees up is
+   refilled almost at once, and queueing behind a busy slot turned the
+   spread of card encode times (57 to 85 s for equal segments) into a
+   cascade of late, cancelled work.
+4. **Learning.** A card's speed estimate starts at `--card-fps` and moves
+   halfway to each finished segment's measured speed. A segment stopped
+   unfinished moves it 30 percent toward that bound (never onto it: the
+   minimum let one slow segment lock a card out for good).
+5. **Backups.** A monitor gives the host a copy of any card segment still
+   unfinished at the last moment the host could make the deadline. The
+   first result wins; a winning host copy cancels the card's. A card
+   segment that fails (for example its encoder ended by the card's
+   out-of-memory killer, which `oom_score_adj` 1000 points at it first)
+   goes to the host at once.
+6. **Assembly.** Segments are Matroska (they carry timestamps; raw HEVC
+   with B-frames has none to copy), joined with FFmpeg's concat demuxer
+   by stream copy, with the input's audio mapped through. The output's
+   frames are counted.
+
+## Cards: the runner
+
+The stack serves one control session per card at a time (`phi.md`), so
+nothing here holds one while a segment encodes. Each card runs
+`phifmpeg-card` (`card/runner`), started detached at the beginning of a
+job with the card's slot count and encoder command, working from
+`/data/phifmpeg/jobs/<job>/` on the card's disk. One host thread per card
+(`card_agent`) visits it: submit (`put` under a dot name, then `mv` into
+`in/`), cancel (`touch cancel/<seg>`), collect about once a second (list
+`done/`, `get` each finished segment, `rm`). At the end it cancels
+whatever the card is still on and touches `stop`.
+
+## Slots
+
+| device | per slot | how many |
+| --- | --- | --- |
+| card | 2 decode threads, x265 `pools=28:frame-threads=2` (513 MB peak) | (`MemAvailable` minus `--reserve-mb`) / `--slot-mb`, at most `--max-card-slots` (5) |
+| card that fits none | one small slot, `pools=14` (414 MB peak) | 1 if `--small-slot-mb` fits |
+| host | 4 decode threads, x265 `pools=--host-pool` | `--host-slots` |
+
+Card: `build/c/ffmpeg` (C only), installed with the runner at
+`/data/phifmpeg/bin/` when the SHA-256 differs. Host: `build/host/ffmpeg`
+(all SIMD). Both are FFmpeg n9.0.2 with x265 4.2.
+
+## Report
+
+Per segment (written to `segments.log` in the job directory): frames,
+device, encode seconds, completion time and slack to the deadline.
+Printed: deadline misses, host backups (and how many won), card attempts
+by outcome with the slot-seconds they cost, final speed estimates, and
+each device's share of the frames.
+
+Measured results: [`docs/results/2026-09-27-cards-and-host-1080p60.md`](../../../docs/results/2026-09-27-cards-and-host-1080p60.md).

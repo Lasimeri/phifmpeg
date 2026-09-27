@@ -35,6 +35,9 @@ pub enum Variant {
     C,
     /// With FFmpeg's and x265's x86 assembly, for the translator.
     Asm,
+    /// For the host itself, with all of both projects' SIMD: the host's
+    /// share of a split transcode runs the same pinned sources as the cards.
+    Host,
 }
 
 impl Variant {
@@ -43,12 +46,40 @@ impl Variant {
         match self {
             Variant::C => "c",
             Variant::Asm => "asm",
+            Variant::Host => "host",
         }
     }
 }
 
 /// CMake arguments for x265.
-fn x265_args(v: Variant, lay: &Layout, env: &HashMap<String, String>, phix: &Path) -> Vec<String> {
+fn x265_args(
+    v: Variant,
+    lay: &Layout,
+    env: &HashMap<String, String>,
+    phix: Option<&Path>,
+) -> Vec<String> {
+    let nasm = format!(
+        "-DCMAKE_ASM_NASM_COMPILER={}",
+        lay.tools().join("bin/nasm").display()
+    );
+    let prefix = format!(
+        "-DCMAKE_INSTALL_PREFIX={}",
+        lay.x265_prefix(v.name()).display()
+    );
+    let Some(phix) = phix else {
+        // The host variant: a native build, the host's own compilers.
+        return vec![
+            "-G".into(),
+            "Ninja".into(),
+            "-DCMAKE_BUILD_TYPE=Release".into(),
+            prefix,
+            "-DENABLE_SHARED=OFF".into(),
+            "-DENABLE_CLI=ON".into(),
+            "-DENABLE_LIBNUMA=OFF".into(),
+            "-DENABLE_ASSEMBLY=ON".into(),
+            nasm,
+        ];
+    };
     let which = |tool: &str| -> String {
         // Absolute paths: CMake caches them, and the imported PATH is only
         // guaranteed while this process runs.
@@ -71,10 +102,7 @@ fn x265_args(v: Variant, lay: &Layout, env: &HashMap<String, String>, phix: &Pat
         format!("-DCMAKE_CXX_COMPILER={}", which("knc-c++")),
         format!("-DCMAKE_AR={}", which("llvm-ar")),
         format!("-DCMAKE_RANLIB={}", which("llvm-ranlib")),
-        format!(
-            "-DCMAKE_INSTALL_PREFIX={}",
-            lay.x265_prefix(v.name()).display()
-        ),
+        prefix,
         // Static library for FFmpeg, and the CLI for encode-only timing.
         "-DENABLE_SHARED=OFF".into(),
         "-DENABLE_CLI=ON".into(),
@@ -88,19 +116,34 @@ fn x265_args(v: Variant, lay: &Layout, env: &HashMap<String, String>, phix: &Pat
     ];
     match v {
         Variant::C => a.push("-DENABLE_ASSEMBLY=OFF".into()),
-        Variant::Asm => {
+        Variant::Asm | Variant::Host => {
             a.push("-DENABLE_ASSEMBLY=ON".into());
-            a.push(format!(
-                "-DCMAKE_ASM_NASM_COMPILER={}",
-                lay.tools().join("bin/nasm").display()
-            ));
+            a.push(nasm);
         }
     }
     a
 }
 
 /// FFmpeg configure arguments for a variant.
-fn configure_args(v: Variant, lay: &Layout, dir: &Path, phix: &Path) -> Vec<String> {
+fn configure_args(v: Variant, lay: &Layout, dir: &Path, phix: Option<&Path>) -> Vec<String> {
+    let nasm = format!("--x86asmexe={}", lay.tools().join("bin/nasm").display());
+    let Some(phix) = phix else {
+        // The host variant: native, SIMD and inline assembly on, x265 from
+        // our prefix (pkg-config confined to it in `build`).
+        return vec![
+            format!("--prefix={}", dir.join("install").display()),
+            "--pkg-config-flags=--static".into(),
+            "--disable-autodetect".into(),
+            "--enable-static".into(),
+            "--disable-shared".into(),
+            "--disable-doc".into(),
+            "--enable-pthreads".into(),
+            "--enable-zlib".into(),
+            "--enable-gpl".into(),
+            "--enable-libx265".into(),
+            nasm,
+        ];
+    };
     let mut a: Vec<String> = vec![
         format!("--prefix={}", dir.join("install").display()),
         // Cross build: the card is x86-64 Linux, but configure must not run
@@ -145,12 +188,7 @@ fn configure_args(v: Variant, lay: &Layout, dir: &Path, phix: &Path) -> Vec<Stri
             a.push("--disable-asm".into());
             a.push("--disable-x86asm".into());
         }
-        Variant::Asm => {
-            a.push(format!(
-                "--x86asmexe={}",
-                lay.tools().join("bin/nasm").display()
-            ));
-        }
+        Variant::Asm | Variant::Host => a.push(nasm),
     }
     a
 }
@@ -171,11 +209,17 @@ fn logged(cmd: &mut Command, env: &HashMap<String, String>, log: &Path, what: &s
     Ok(())
 }
 
-/// Build the card runtime (`card/phix`) for the stack's card target and
-/// return the directory holding `libphix.a`. Always from clean: cargo's
+/// Build the card workspace (`card/phix`, the runtime linked into FFmpeg
+/// and x265, and `card/runner`, the transcode runner) for the stack's card
+/// target and return the directory holding `libphix.a` and `phifmpeg-card`. Always from clean: cargo's
 /// fingerprints do not cover the patched LLVM library rustc loads (the
 /// stack's ADR 0007), so a rebuilt LLVM would otherwise leave stale objects.
-fn build_phix(stack: &Stack, repo: &Path, env: &HashMap<String, String>) -> Result<PathBuf> {
+fn build_phix(
+    stack: &Stack,
+    repo: &Path,
+    env: &HashMap<String, String>,
+    log: &Path,
+) -> Result<PathBuf> {
     let phi_root = PathBuf::from(&env["phi_root"]);
     let target = phi_root.join("toolchain/rust/x86_64-knc-linux-musl.json");
     let dylib = phi_root.join("toolchain/build/llvm-dylib/lib");
@@ -193,12 +237,19 @@ fn build_phix(stack: &Stack, repo: &Path, env: &HashMap<String, String>) -> Resu
         _ => dylib.display().to_string(),
     };
     e.insert("LD_LIBRARY_PATH".into(), ld);
-    println!("== building card/phix for the card");
-    let log = lay_log(repo);
+    // The runner is a std program: the card target links it with knc-cc.
+    e.insert(
+        "CARGO_TARGET_X86_64_KNC_LINUX_MUSL_LINKER".into(),
+        phi_root
+            .join("toolchain/clang/knc-cc")
+            .display()
+            .to_string(),
+    );
+    println!("== building card/ (phix, phifmpeg-card) for the card");
     logged(
         Command::new("cargo").arg("clean").current_dir(&card),
         &e,
-        &log,
+        log,
         "cargo clean in card/",
     )?;
     logged(
@@ -206,26 +257,22 @@ fn build_phix(stack: &Stack, repo: &Path, env: &HashMap<String, String>) -> Resu
             .args([
                 "build",
                 "-Zjson-target-spec",
-                "-Zbuild-std=core",
+                "-Zbuild-std=core,alloc,std,panic_abort",
                 "--release",
                 "--target",
             ])
             .arg(&target)
             .current_dir(&card),
         &e,
-        &log,
+        log,
         "cargo build in card/",
     )?;
     let dir = card.join("target/x86_64-knc-linux-musl/release");
-    let lib = dir.join("libphix.a");
-    println!("== phi-isa-audit {}", lib.display());
-    run(Command::new(stack.isa_audit()?).arg(&lib))?;
+    for built in [dir.join("libphix.a"), dir.join("phifmpeg-card")] {
+        println!("== phi-isa-audit {}", built.display());
+        run(Command::new(stack.isa_audit()?).arg(&built))?;
+    }
     Ok(dir)
-}
-
-/// Log file for the card crate build.
-fn lay_log(repo: &Path) -> PathBuf {
-    repo.join("card/target/phifmpeg-build.log")
 }
 
 /// Reconfigure only when the argument list changed (kept in `flags_file`).
@@ -235,7 +282,12 @@ fn needs_configure(flags_file: &Path, args: &[String], marker: &Path) -> bool {
 }
 
 /// Build x265 for a variant and install it into its prefix.
-fn build_x265(lay: &Layout, env: &HashMap<String, String>, v: Variant, phix: &Path) -> Result<()> {
+fn build_x265(
+    lay: &Layout,
+    env: &HashMap<String, String>,
+    v: Variant,
+    phix: Option<&Path>,
+) -> Result<()> {
     let dir = lay.variant(&format!("x265-{}", v.name()));
     std::fs::create_dir_all(&dir)?;
     let args = x265_args(v, lay, env, phix);
@@ -279,9 +331,25 @@ pub fn build(stack: &Stack, repo: &Path, lay: &Layout, pins: &Pins, v: Variant) 
             lay.tools().display()
         );
     }
-    let mut env = stack.toolchain_env()?;
-    let phix = build_phix(stack, repo, &env)?;
-    build_x265(lay, &env, v, &phix)?;
+    // Card variants build with the stack's environment (its PATH, and
+    // CC=knc-cc, which CMake would honour); the host variant must not.
+    let host = v == Variant::Host;
+    let mut env: HashMap<String, String> = if host {
+        std::env::vars().collect()
+    } else {
+        stack.toolchain_env()?
+    };
+    let phix = if host {
+        None
+    } else {
+        Some(build_phix(
+            stack,
+            repo,
+            &env,
+            &lay.root.join("phix-build.log"),
+        )?)
+    };
+    build_x265(lay, &env, v, phix.as_deref())?;
     env.insert(
         "PKG_CONFIG_LIBDIR".into(),
         lay.x265_prefix(v.name())
@@ -293,7 +361,7 @@ pub fn build(stack: &Stack, repo: &Path, lay: &Layout, pins: &Pins, v: Variant) 
 
     let dir = lay.variant(v.name());
     std::fs::create_dir_all(&dir)?;
-    let args = configure_args(v, lay, &dir, &phix);
+    let args = configure_args(v, lay, &dir, phix.as_deref());
     let flags_file = dir.join("phifmpeg.flags");
     if needs_configure(&flags_file, &args, &dir.join("ffbuild/config.mak")) {
         println!("== configuring ffmpeg {} in {}", v.name(), dir.display());
@@ -317,6 +385,9 @@ pub fn build(stack: &Stack, repo: &Path, lay: &Layout, pins: &Pins, v: Variant) 
         "make",
     )?;
     let bin = dir.join("ffmpeg_g");
+    if host {
+        return Ok(bin);
+    }
     audit(stack, &bin, v)?;
     audit(
         stack,
@@ -334,7 +405,7 @@ pub fn audit(stack: &Stack, bin: &Path, v: Variant) -> Result<()> {
     cmd.arg(bin);
     match v {
         Variant::C => run(&mut cmd),
-        Variant::Asm => {
+        Variant::Asm | Variant::Host => {
             // Hits are expected: the SIMD functions. Report them.
             let _ = cmd.status();
             Ok(())

@@ -8,9 +8,11 @@
 mod fetch;
 mod ffbuild;
 mod layout;
+mod phi;
 mod pins;
 mod prof;
 mod stack;
+mod transcode;
 
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
@@ -36,6 +38,8 @@ enum Cmd {
     Stack,
     /// Fetch the pinned FFmpeg and build the pinned nasm.
     Fetch,
+    /// Real-time HEVC transcode shared between the cards and the host.
+    Transcode(transcode::Opts),
     /// Map card profiler samples (PHIX_PROF) to functions.
     Prof {
         /// The unstripped binary that ran (ffmpeg_g, x265).
@@ -101,6 +105,11 @@ fn real_main() -> Result<()> {
             println!("ffmpeg      {} at {}", pins.ffmpeg.tag, pins.ffmpeg.commit);
         }
         Cmd::Fetch => fetch::fetch(&lay, &pins)?,
+        Cmd::Transcode(o) => {
+            let s = Stack::find(&repo)?;
+            let runner = repo.join("card/target/x86_64-knc-linux-musl/release/phifmpeg-card");
+            transcode::transcode(&lay, phi::Phi::new(&s), &runner, o)?;
+        }
         Cmd::Prof { elf, samples, top } => prof::report(&elf, &samples, top)?,
         Cmd::Build { variant } => {
             let s = Stack::find(&repo)?;

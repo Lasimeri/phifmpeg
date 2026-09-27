@@ -35,7 +35,29 @@ So FFmpeg is built for the card by the stack's compiler (knc64-x87 ABI:
 x87 floating point, no SSE, no CMOV) and runs there as a normal static
 program, with its threads spread over the 57 cores.
 
-## The vector unit: a translator, not a fork
+## The cards as co-processors
+
+The owner's framing (2026-09-27): the cards are co-CPUs; they process
+what they can and the host performs the rest. For a transcode that is a
+scheduling problem, solved in `phifmpeg transcode`
+([`host/phifmpeg/src/transcode.md`](../host/phifmpeg/src/transcode.md)):
+
+- the unit of work is a segment between keyframes, independent of every
+  other, so any device can take any segment;
+- real time is a deadline per segment (its end in the video plus a fixed
+  latency), and a card gets a segment only when its measured speed says it
+  will make that deadline;
+- the host encodes everything else, and backs up any card segment that
+  runs late, so the cards add capacity without ever putting real time at
+  risk.
+
+Measured on 5 minutes of 1080p60: the cards encoded 19.3 percent, with no
+missed deadline and no wasted card work
+([results](results/2026-09-27-cards-and-host-1080p60.md)). Their share is
+bounded by their C speed (card 0 about 9 fps) and by card 1's memory, of
+which the AVX-512 worker holds 2.7 GB.
+
+## The vector unit (next): a translator, not a fork
 
 FFmpeg's speed on x86 comes from its hand-written SIMD functions (SSE2 up to
 AVX2, NASM sources under `libavcodec/x86`). The card has none of those
@@ -80,10 +102,11 @@ Correctness gates, all from FFmpeg itself, unmodified:
 | C-only build for the card, ISA audit clean | done |
 | decode bit-exact on the card, thread sweep | done, [results](results/2026-09-27-c-baseline.md) |
 | `asm` variant build | done (audit in the results record) |
-| `phix`: symbol table, profiler, translator | next |
-| launcher: 2+ threads per core, OOM guard, both cards | next |
-| encoder (x265, unmodified) | after decode |
-| host-facing transcode command | after that |
+| encoder: x265 4.2, unmodified, C only on the cards | done, [results](results/2026-09-27-encode-baseline.md) |
+| `phix` runtime: linked by flags, profiler | done |
+| card runner, OOM guard, both cards | done |
+| real-time transcode, cards + host | done, [results](results/2026-09-27-cards-and-host-1080p60.md) |
+| vector unit for x265's hot functions | next |
 
 ## Rules for running on the cards
 

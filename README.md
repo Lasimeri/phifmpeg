@@ -1,15 +1,21 @@
 # phifmpeg
 
-An unmodified FFmpeg on two Intel Xeon Phi 3120 coprocessor cards (Knights
-Corner, 57 cores and 228 threads each), aiming at real-time HEVC decode and
-encode the way a host uses NVDEC and NVENC.
+An unmodified FFmpeg (with an unmodified x265) on two Intel Xeon Phi 3120
+coprocessor cards (Knights Corner, 57 cores and 228 threads each), used
+the way a host uses NVDEC and NVENC: real-time HEVC transcoding where the
+cards take every part they can finish in time and the host does the rest.
 
-- **FFmpeg is not modified.** The pinned upstream release (n9.0.2) is built
-  as it is; configure flags are the only input, and the build refuses a
-  tree that differs from the pinned commit.
-- **Everything around it is Rust**: the host command, the card-side
-  translator that runs FFmpeg's SIMD functions on each core's 512-bit vector
-  unit, the launcher that spreads the work at two or more threads per core.
+- **FFmpeg and x265 are not modified.** The pinned upstream releases
+  (FFmpeg n9.0.2, x265 4.2) are built as they are; build flags are the only
+  input, and the build refuses a tree that differs from the pinned commit.
+- **Everything around them is Rust**: the host command that builds,
+  schedules and verifies; the card runner; the card-side runtime library
+  (a profiler today, the vector unit next).
+- **The cards are co-processors.** `phifmpeg transcode` cuts the video at
+  keyframes, gives each segment to a card when the card can finish it
+  before its real-time deadline, and to the host otherwise; the host also
+  backs up any card segment that runs late, so real time never depends on
+  the cards.
 
 The cards run the mainline Linux port and the cross toolchain of
 [Intel-Phi-3120A](https://github.com/Lasimeri/Intel-Phi-3120A); this
@@ -22,12 +28,12 @@ repository builds on that and copies nothing from it.
 | FFmpeg n9.0.2 for the card, C only | builds, ISA audit clean (4.49 M instructions, 0 illegal) |
 | HEVC decode on card 0 | **bit-exact** (300/300 frame hashes match the host); 1080p30 at **29.8 fps** with 228 threads, 25.2 with 114 |
 | x265 4.2 (HEVC encoder) for the card, C only | builds, audit clean; linked into FFmpeg as `libx265` |
-| encode on card 0 (BBB 1080p60, ultrafast) | 3.8 fps per instance, **9.7 fps** with 4 instances; full transcode 3.3 fps per process |
-| FFmpeg and x265 with their x86 SIMD, for the translator | builds; the card lacks those instructions, so they run only through the translator |
-| translator (SIMD to the VPU) | next: x265's SSE2 functions (3x on the host) |
-| both cards, host-facing transcode | not started |
+| **real-time 1080p60 transcode, cards + host** | **`phifmpeg transcode`: 5 min of BBB 1080p60, 0 deadline misses, cards encoded 19.3% (card 0 16.0%, card 1 3.3%), host the rest; output verified (decodes clean, card and host encodes of the same segment within 0.06 dB)** |
+| card 0 alone, C only | about 9.3 fps of 1080p60 ultrafast (5 encoder slots, memory-bound) |
+| FFmpeg and x265 with their x86 SIMD, for the vector unit | builds; the card lacks those instructions |
+| vector unit | next lever: x265's SSE2 code is 3x its C code on the host |
 
-Numbers and how they were checked: [decode](docs/results/2026-09-27-c-baseline.md), [encode and the 1080p60 budget](docs/results/2026-09-27-encode-baseline.md).
+Numbers and how they were checked: [decode](docs/results/2026-09-27-c-baseline.md), [encode and the 1080p60 budget](docs/results/2026-09-27-encode-baseline.md), [cards and host together](docs/results/2026-09-27-cards-and-host-1080p60.md).
 How the pieces fit and why: [`docs/design.md`](docs/design.md).
 
 For scale, the same decode on the host: 596 fps with FFmpeg's own SIMD,
@@ -43,10 +49,15 @@ patch 0010) and a card up for anything that runs. Then, in this checkout:
 ```
 cargo build
 target/debug/phifmpeg stack                 # finds the stack and its toolchain
-target/debug/phifmpeg fetch                 # pinned FFmpeg + nasm
-target/debug/phifmpeg build --variant c     # C only, audited clean
-target/debug/phifmpeg build --variant asm   # with FFmpeg's SIMD (for the translator)
+target/debug/phifmpeg fetch                 # pinned FFmpeg, x265 and nasm
+target/debug/phifmpeg build --variant c     # card: C only, audited clean, plus card/ (runtime, runner)
+target/debug/phifmpeg build --variant host  # host: the same sources with all their SIMD
+target/debug/phifmpeg transcode IN.mkv OUT.mkv   # real-time HEVC, cards + host
 ```
+
+The input needs closed GOPs (every keyframe an IDR); `--latency`
+(default 150 s) is the real-time budget and must exceed what a card needs
+for one segment (about 70 s for 2 s of 1080p60 at ultrafast).
 
 Build trees go to `build/` (or `PHIFMPEG_BUILD`), several GB.
 
