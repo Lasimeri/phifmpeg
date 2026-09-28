@@ -11,11 +11,12 @@ The build root and what lives under it:
 | `prefix/<variant>` | x265 installed for a variant (`libx265.a`, headers, `x265.pc`) | `build` |
 | `build/<variant>` | out-of-tree FFmpeg builds (`c`, `host`); `ffmpeg_g` is the unstripped binary, `ffmpeg` the stripped one | `build` |
 | `build/x265-<variant>` | out-of-tree x265 builds, with the `x265` CLI | `build` |
-| `phix-build.log` | the last card workspace build | `build` (card variants) |
+| `phix-build.log` | the last card workspace build | `build --variant c` |
 | `jobs/<job>/` | one transcode: `in/` (segments), `out/` (encoded segments, one file per device), `segments.txt` (the concat list), `segments.log` (the per-segment report) | `transcode` |
 
 The card workspace itself builds into `card/target/` in the repository
-(git-ignored), not under the build root.
+(git-ignored), not under the build root; `ffbuild::card_target` names the
+directory its card binaries land in.
 
 The root is `PHIFMPEG_BUILD`, else `<repo>/build` (git-ignored; on the
 development host it is a symlink to a second disk, because the build trees,

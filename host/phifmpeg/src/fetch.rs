@@ -7,16 +7,14 @@
 //! variant; it is built from a SHA-256-checked tarball into the build root,
 //! so nothing is installed on the host.
 
-use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
-use sha2::{Digest, Sha256};
+use anyhow::{bail, Result};
 
 use crate::layout::Layout;
 use crate::pins::{GitPin, Pins};
-use crate::run;
+use crate::util::{capture, jobs, run, sha256_file};
 
 /// Fetch everything `pins.toml` names.
 pub fn fetch(lay: &Layout, pins: &Pins) -> Result<()> {
@@ -129,40 +127,4 @@ fn fetch_nasm(lay: &Layout, pins: &Pins) -> Result<()> {
         .current_dir(&src))?;
     run(Command::new("make").arg("install").current_dir(&src))?;
     Ok(())
-}
-
-/// Hex SHA-256 of a file.
-pub fn sha256_file(p: &Path) -> Result<String> {
-    let mut f = std::fs::File::open(p).with_context(|| format!("opening {}", p.display()))?;
-    let mut h = Sha256::new();
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let n = f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-    }
-    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
-}
-
-/// Run a command and return its stdout; fail on a non-zero exit.
-pub fn capture(cmd: &mut Command) -> Result<String> {
-    let out = cmd.output().with_context(|| format!("running {cmd:?}"))?;
-    if !out.status.success() {
-        bail!("{cmd:?} failed: {}", String::from_utf8_lossy(&out.stderr));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-/// Parallel jobs for host builds: `PHIFMPEG_JOBS`, else the CPU count.
-pub fn jobs() -> usize {
-    std::env::var("PHIFMPEG_JOBS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4)
-        })
 }

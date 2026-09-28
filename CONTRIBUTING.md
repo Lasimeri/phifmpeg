@@ -48,8 +48,10 @@ sections are the same in every repository of the family (see
   device did which part.
 - On a card, every phifmpeg process runs with `oom_score_adj` 1000, so a
   memory shortage ends an encoder and never a sibling's resident worker.
-- `make check` (docs, format, lint, build, unit tests) needs no card.
-  What needs one is run by hand against a card that is up (`phifmpeg
+- `make check` (docs, format, lint, build, unit tests) needs no card and
+  no stack: the card crates are formatted, linted and type-checked for the
+  host there, and compiled for the card only by `phifmpeg build`. What
+  needs a card is run by hand against one that is up (`phifmpeg
   transcode`, the card profiler) and recorded under `docs/results/`.
 
 ## The family

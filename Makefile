@@ -1,8 +1,13 @@
 # Top-level entry points. The real work is in the Rust host command
 # (host/phifmpeg). Run `make help` for the list.
+#
+# The card crates (card/) are a separate workspace that `phifmpeg build`
+# compiles for the card. Here they are formatted, linted and type-checked for
+# the host, which needs neither the stack nor a card.
 
 .DEFAULT_GOAL := help
 PHIFMPEG := target/debug/phifmpeg
+CARD := --manifest-path card/Cargo.toml
 
 .PHONY: help build test fmt clippy docs-check check ffmpeg clean
 
@@ -12,24 +17,27 @@ help: ## Show this help
 build: ## Build the host command
 	cargo build
 
-test: ## Run host tests that do not need a card
+test: ## Run the unit tests (none needs a card)
 	cargo test
 
-fmt: ## Check formatting
+fmt: ## Check formatting, both workspaces
 	cargo fmt --all -- --check
+	cargo fmt --all $(CARD) -- --check
 
-clippy: ## Lint
+clippy: ## Lint both workspaces (the card crates without test targets: phix is no_std)
 	cargo clippy --all-targets -- -D warnings
+	cargo clippy $(CARD) -- -D warnings
 
 docs-check: ## Enforce sibling .md files, the no-dash rule and relative links
 	scripts/check-docs.sh
 
-check: docs-check fmt clippy build test ## Everything CI would run
+check: docs-check fmt clippy build test ## Everything that needs no card
 
 ffmpeg: build ## Fetch the pinned sources; build the card (c) and host variants a transcode needs
 	$(PHIFMPEG) fetch
 	$(PHIFMPEG) build --variant c
 	$(PHIFMPEG) build --variant host
 
-clean: ## Remove the host command's build outputs (not the FFmpeg build root)
+clean: ## Remove both workspaces' build outputs (not the FFmpeg build root)
 	cargo clean
+	cargo clean $(CARD)

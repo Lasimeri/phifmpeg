@@ -26,6 +26,7 @@
 //! FFmpeg's concat demuxer.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,9 +37,20 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
-use crate::fetch::{capture, sha256_file};
 use crate::layout::Layout;
 use crate::phi::Phi;
+use crate::util::{capture, sha256_file};
+
+/// Where phifmpeg lives on a card's disk: the binaries under `bin/`, one
+/// directory per transcode under `jobs/`.
+const CARD_ROOT: &str = "/data/phifmpeg";
+/// FFmpeg decode threads per card slot: 2 keeps a slot at 513 MiB peak
+/// where 4 took 640 MiB, at the same speed.
+const CARD_DECODE_THREADS: usize = 2;
+/// x265 frame threads per card slot, fixed for the same reason.
+const CARD_FRAME_THREADS: usize = 2;
+/// FFmpeg decode threads per host slot.
+const HOST_DECODE_THREADS: usize = 4;
 
 /// Options for one transcode.
 #[derive(clap::Args, Clone)]
@@ -126,20 +138,87 @@ struct Seg {
     end: f64,
 }
 
+/// The device that encoded a segment.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Device {
+    Card(u32),
+    /// A host slot.
+    Host(usize),
+}
+
+impl Device {
+    fn is_host(self) -> bool {
+        matches!(self, Device::Host(_))
+    }
+
+    /// The report's per-device line: the host's slots count as one device.
+    fn group(self) -> String {
+        match self {
+            Device::Card(c) => format!("card {c}"),
+            Device::Host(_) => "host".to_string(),
+        }
+    }
+}
+
+impl fmt::Display for Device {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Device::Card(c) => write!(f, "card {c}"),
+            Device::Host(s) => write!(f, "host {s}"),
+        }
+    }
+}
+
 /// A finished segment.
 #[derive(Clone)]
 struct Done {
-    by: String,
+    by: Device,
     secs: f64,
     at: f64,
     out: PathBuf,
+}
+
+/// What became of one card attempt at a segment.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// The card's result was kept.
+    Finished,
+    /// The card finished, but after the host's backup had won.
+    FinishedTooLate,
+    /// Cancelled on the card because the host's backup won.
+    HostWon,
+    /// The encoder failed on the card.
+    Failed,
+    /// Encoded, but the result could not be fetched.
+    FetchFailed,
+}
+
+impl Outcome {
+    /// Every outcome, in the report's order.
+    const ALL: [Outcome; 5] = [
+        Outcome::Finished,
+        Outcome::FinishedTooLate,
+        Outcome::HostWon,
+        Outcome::Failed,
+        Outcome::FetchFailed,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Outcome::Finished => "finished",
+            Outcome::FinishedTooLate => "finished too late",
+            Outcome::HostWon => "stopped, host won",
+            Outcome::Failed => "failed",
+            Outcome::FetchFailed => "fetch failed",
+        }
+    }
 }
 
 /// One card attempt at a segment, for the report.
 struct Attempt {
     card: u32,
     secs: f64,
-    outcome: &'static str,
+    outcome: Outcome,
 }
 
 #[derive(Default, Clone)]
@@ -151,11 +230,11 @@ struct State {
 }
 
 /// A card slot as the scheduler sees it: the runner on that card encodes
-/// up to its slot count at once, first come first served.
+/// up to its slot count at once, first come first served. A slot holds one
+/// segment at a time (placement takes idle slots only).
 struct VSlot {
     card: u32,
-    busy_until: Instant,
-    queued: usize,
+    busy: bool,
 }
 
 /// What a card's agent thread is asked to do.
@@ -222,15 +301,11 @@ impl Shared {
     fn release_slot(&self, i: usize) {
         let k = self.seg_slot.lock().unwrap()[i].take();
         if let Some(k) = k {
-            let mut s = self.slots.lock().unwrap();
-            s[k].queued = s[k].queued.saturating_sub(1);
-            if s[k].queued == 0 {
-                s[k].busy_until = Instant::now();
-            }
+            self.slots.lock().unwrap()[k].busy = false;
         }
     }
     /// Record a finished segment; false if another device got there first.
-    fn finish(&self, i: usize, by: String, secs: f64, out: PathBuf) -> bool {
+    fn finish(&self, i: usize, by: Device, secs: f64, out: PathBuf) -> bool {
         {
             let mut st = self.state.lock().unwrap();
             if st[i].done.is_some() {
@@ -248,11 +323,25 @@ impl Shared {
         true
     }
     fn card_dir(&self) -> String {
-        format!("/data/phifmpeg/jobs/{}", self.job)
+        card_job_dir(&self.job)
     }
-    fn x265_params(&self, pool: usize) -> String {
-        format!("pools={pool}:repeat-headers=1:log-level=error")
+}
+
+/// A job's directory on a card's disk.
+fn card_job_dir(job: &str) -> String {
+    format!("{CARD_ROOT}/jobs/{job}")
+}
+
+/// x265's parameters for one slot: the pool size, frame threads where
+/// they are fixed (the cards, for memory), and headers on every keyframe so
+/// that segments join.
+fn x265_params(pool: usize, frame_threads: Option<usize>) -> String {
+    let mut p = format!("pools={pool}");
+    if let Some(n) = frame_threads {
+        p.push_str(&format!(":frame-threads={n}"));
     }
+    p.push_str(":repeat-headers=1:log-level=error");
+    p
 }
 
 /// Run one transcode.
@@ -261,10 +350,10 @@ pub fn transcode(lay: &Layout, phi: Phi, runner: &Path, opts: Opts) -> Result<()
     let host_ffprobe = lay.variant("host").join("ffprobe");
     let card_ffmpeg = lay.variant("c").join("ffmpeg");
     for b in [
-        &host_ffmpeg,
-        &host_ffprobe,
-        &card_ffmpeg,
-        &runner.to_path_buf(),
+        host_ffmpeg.as_path(),
+        host_ffprobe.as_path(),
+        card_ffmpeg.as_path(),
+        runner,
     ] {
         if !b.is_file() {
             bail!(
@@ -273,12 +362,10 @@ pub fn transcode(lay: &Layout, phi: Phi, runner: &Path, opts: Opts) -> Result<()
             );
         }
     }
-    let job = format!(
-        "{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs()
-    );
+    let job = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs()
+        .to_string();
     let dir = lay.root.join("jobs").join(&job);
     std::fs::create_dir_all(dir.join("in"))?;
     std::fs::create_dir_all(dir.join("out"))?;
@@ -334,7 +421,7 @@ pub fn transcode(lay: &Layout, phi: Phi, runner: &Path, opts: Opts) -> Result<()
 
     // Per card: slots from free memory, binaries in place, runner started.
     let mut card_slots: Vec<(u32, usize)> = Vec::new();
-    let cdir = format!("/data/phifmpeg/jobs/{job}");
+    let cdir = card_job_dir(&job);
     for &c in &opts.cards {
         let avail = phi.mem_available(c)? / (1024 * 1024);
         let room = avail.saturating_sub(opts.reserve_mb);
@@ -349,36 +436,37 @@ pub fn transcode(lay: &Layout, phi: Phi, runner: &Path, opts: Opts) -> Result<()
         if n == 0 {
             continue;
         }
-        install(&phi, c, &card_ffmpeg, "/data/phifmpeg/bin/ffmpeg")?;
-        install(&phi, c, runner, "/data/phifmpeg/bin/phifmpeg-card")?;
-        let params = format!("pools={pool}:frame-threads=2:repeat-headers=1:log-level=error");
+        let ffmpeg = format!("{CARD_ROOT}/bin/ffmpeg");
+        let card_runner = format!("{CARD_ROOT}/bin/phifmpeg-card");
+        install(&phi, c, &card_ffmpeg, &ffmpeg)?;
+        install(&phi, c, runner, &card_runner)?;
         let encode = format!(
-            "/data/phifmpeg/bin/ffmpeg -nostdin -hide_banner -loglevel error -threads 2 -i {{in}} -c:v libx265 -preset {} -crf {} -x265-params {params} -f matroska -y {{out}}",
-            opts.preset, opts.crf
+            "{ffmpeg} -nostdin -hide_banner -loglevel error -threads {CARD_DECODE_THREADS} -i {{in}} -c:v libx265 -preset {} -crf {} -x265-params {} -f matroska -y {{out}}",
+            opts.preset,
+            opts.crf,
+            x265_params(pool, Some(CARD_FRAME_THREADS))
         );
         phi.sh_ok(
             c,
             &format!(
-                "mkdir -p {cdir} && setsid /data/phifmpeg/bin/phifmpeg-card serve {cdir} {n} {encode} > {cdir}/runner.log 2>&1 < /dev/null & sleep 0.3; cat {cdir}/runner.log"
+                "mkdir -p {cdir} && setsid {card_runner} serve {cdir} {n} {encode} > {cdir}/runner.log 2>&1 < /dev/null & sleep 0.3; cat {cdir}/runner.log"
             ),
         )?;
         card_slots.push((c, n));
     }
 
     let n = segs.len();
-    let now = Instant::now();
-    let mut slots = Vec::new();
-    for &(c, k) in &card_slots {
-        for _ in 0..k {
-            slots.push(VSlot {
+    let slots: Vec<VSlot> = card_slots
+        .iter()
+        .flat_map(|&(c, k)| {
+            (0..k).map(move |_| VSlot {
                 card: c,
-                busy_until: now,
-                queued: 0,
-            });
-        }
-    }
+                busy: false,
+            })
+        })
+        .collect();
     let sh = Arc::new(Shared {
-        t0: now,
+        t0: Instant::now(),
         card_fps: Mutex::new(card_slots.iter().map(|c| (c.0, opts.card_fps)).collect()),
         host_fps: Mutex::new(opts.host_fps),
         attempts: Mutex::new(Vec::new()),
@@ -412,10 +500,10 @@ pub fn transcode(lay: &Layout, phi: Phi, runner: &Path, opts: Opts) -> Result<()
         let (sh2, btx) = (sh.clone(), backup_tx.clone());
         handles.push(thread::spawn(move || card_agent(c, sh2, rx, btx)));
     }
-    let monitor = {
+    {
         let (sh, btx) = (sh.clone(), backup_tx.clone());
-        thread::spawn(move || monitor(sh, btx))
-    };
+        handles.push(thread::spawn(move || monitor(sh, btx)));
+    }
     drop(backup_tx);
 
     // Segments arrive at the video's own pace: a live segment exists once
@@ -436,7 +524,7 @@ pub fn transcode(lay: &Layout, phi: Phi, runner: &Path, opts: Opts) -> Result<()
             // a busy slot (the first version) turned encode-time spread
             // (57 to 85 s) into late segments, cancelled work and a cascade.
             for (k, s) in slots.iter().enumerate() {
-                if s.queued > 0 {
+                if s.busy {
                     continue;
                 }
                 let est = opts.card_safety * sh.segs[i].frames as f64 / sh.card_speed(s.card)
@@ -448,8 +536,7 @@ pub fn transcode(lay: &Layout, phi: Phi, runner: &Path, opts: Opts) -> Result<()
             }
             match best {
                 Some((k, finish)) if finish <= deadline => {
-                    slots[k].busy_until = finish;
-                    slots[k].queued += 1;
+                    slots[k].busy = true;
                     Some((k, slots[k].card))
                 }
                 _ => None,
@@ -483,7 +570,6 @@ pub fn transcode(lay: &Layout, phi: Phi, runner: &Path, opts: Opts) -> Result<()
     for h in handles {
         let _ = h.join();
     }
-    let _ = monitor.join();
 
     report(&sh, wall, total, &card_slots)?;
     assemble(&sh, &opts, &host_ffprobe)?;
@@ -498,7 +584,8 @@ fn install(phi: &Phi, card: u32, local: &Path, remote: &str) -> Result<()> {
         .unwrap_or_default();
     if !have.starts_with(&want) {
         println!("== card {card}: installing {remote}");
-        phi.sh_ok(card, "mkdir -p /data/phifmpeg/bin")?;
+        let dir = remote.rsplit_once('/').map_or(".", |(d, _)| d);
+        phi.sh_ok(card, &format!("mkdir -p {dir}"))?;
         // `put` keeps the local file mode (0755).
         phi.put(card, local, remote)?;
     }
@@ -617,21 +704,21 @@ fn collect(card: u32, sh: &Shared, d: &str, outstanding: &mut Vec<usize>, backup
                 let out = sh.dir.join(format!("out/seg{i:05}.card{card}.mkv"));
                 match sh.phi.get(card, &format!("{d}/done/{name}.mkv"), &out) {
                     Ok(()) => {
-                        if sh.finish(i, format!("card {card}"), secs, out) {
+                        if sh.finish(i, Device::Card(card), secs, out) {
                             sh.learn_card(card, fps);
-                            "finished"
+                            Outcome::Finished
                         } else {
                             // Finished after the host's backup: the card
                             // needed `secs`, so `fps` bounds its speed.
                             sh.learn_card_bound(card, fps);
-                            "finished too late"
+                            Outcome::FinishedTooLate
                         }
                     }
                     Err(_) => {
                         if !sh.is_done(i) {
                             backup.send(i).ok();
                         }
-                        "fetch failed"
+                        Outcome::FetchFailed
                     }
                 }
             }
@@ -639,7 +726,7 @@ fn collect(card: u32, sh: &Shared, d: &str, outstanding: &mut Vec<usize>, backup
                 if secs > 0.0 {
                     sh.learn_card_bound(card, fps);
                 }
-                "stopped, host won"
+                Outcome::HostWon
             }
             _ => {
                 eprintln!("   card {card}: segment {i} failed on the card: {rest}");
@@ -647,7 +734,7 @@ fn collect(card: u32, sh: &Shared, d: &str, outstanding: &mut Vec<usize>, backup
                     sh.release_slot(i);
                     backup.send(i).ok();
                 }
-                "failed"
+                Outcome::Failed
             }
         };
         sh.attempts.lock().unwrap().push(Attempt {
@@ -696,7 +783,7 @@ fn host_worker(
         match host_encode(&sh, i, &out) {
             Ok(()) => {
                 let secs = t.elapsed().as_secs_f64();
-                if sh.finish(i, format!("host {slot}"), secs, out) {
+                if sh.finish(i, Device::Host(slot), secs, out) {
                     let fps = sh.segs[i].frames as f64 / secs;
                     let mut h = sh.host_fps.lock().unwrap();
                     *h = 0.5 * *h + 0.5 * fps;
@@ -718,15 +805,8 @@ fn host_worker(
 fn host_encode(sh: &Shared, i: usize, out: &Path) -> Result<()> {
     let o = &sh.opts;
     let st = Command::new(&sh.host_ffmpeg)
-        .args([
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-threads",
-            "4",
-            "-i",
-        ])
+        .args(["-nostdin", "-hide_banner", "-loglevel", "error"])
+        .args(["-threads", &HOST_DECODE_THREADS.to_string(), "-i"])
         .arg(&sh.segs[i].input)
         .args([
             "-c:v",
@@ -736,7 +816,7 @@ fn host_encode(sh: &Shared, i: usize, out: &Path) -> Result<()> {
             "-crf",
             &o.crf.to_string(),
         ])
-        .args(["-x265-params", &sh.x265_params(o.host_pool)])
+        .args(["-x265-params", &x265_params(o.host_pool, None)])
         .args(["-f", "matroska", "-y"])
         .arg(out)
         .status()?;
@@ -824,15 +904,11 @@ fn report(sh: &Shared, wall: f64, total: u64, cards: &[(u32, usize)]) -> Result<
         }
         if s.backup {
             backups += 1;
-            if d.by.starts_with("host") {
+            if d.by.is_host() {
                 backup_wins += 1;
             }
         }
-        let dev = if d.by.starts_with("host") {
-            "host".to_string()
-        } else {
-            d.by.clone()
-        };
+        let dev = d.by.group();
         match by_dev.iter_mut().find(|e| e.0 == dev) {
             Some(e) => {
                 e.1 += sh.segs[i].frames;
@@ -840,9 +916,14 @@ fn report(sh: &Shared, wall: f64, total: u64, cards: &[(u32, usize)]) -> Result<
             }
             None => by_dev.push((dev, sh.segs[i].frames, 1)),
         }
+        // `to_string` so that the column width applies.
         lines.push_str(&format!(
             "{i:>4} {:>7}  {:<7} {:>5.1} {:>8.1} {:>6.1}\n",
-            sh.segs[i].frames, d.by, d.secs, d.at, slack
+            sh.segs[i].frames,
+            d.by.to_string(),
+            d.secs,
+            d.at,
+            slack
         ));
     }
     std::fs::write(sh.dir.join("segments.log"), &lines)?;
@@ -855,13 +936,7 @@ fn report(sh: &Shared, wall: f64, total: u64, cards: &[(u32, usize)]) -> Result<
     println!("card slots: {cards:?}");
     let att = sh.attempts.lock().unwrap();
     for &(c, _) in cards {
-        for outcome in [
-            "finished",
-            "finished too late",
-            "stopped, host won",
-            "failed",
-            "fetch failed",
-        ] {
+        for outcome in Outcome::ALL {
             let a: Vec<&Attempt> = att
                 .iter()
                 .filter(|a| a.card == c && a.outcome == outcome)
@@ -871,7 +946,8 @@ fn report(sh: &Shared, wall: f64, total: u64, cards: &[(u32, usize)]) -> Result<
             }
             let secs: f64 = a.iter().map(|a| a.secs).sum();
             println!(
-                "  card {c} attempts {outcome}: {} ({secs:.0} slot-seconds)",
+                "  card {c} attempts {}: {} ({secs:.0} slot-seconds)",
+                outcome.label(),
                 a.len()
             );
         }
@@ -904,7 +980,7 @@ fn report(sh: &Shared, wall: f64, total: u64, cards: &[(u32, usize)]) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::parse_rate;
+    use super::{card_job_dir, parse_rate, x265_params, Device};
 
     #[test]
     fn frame_rates() {
@@ -914,5 +990,29 @@ mod tests {
         assert!(parse_rate("0/0").is_err());
         assert!(parse_rate("60/0").is_err());
         assert!(parse_rate("x/1").is_err());
+    }
+
+    /// The card slot's parameters as measured (513 MiB peak); the host's
+    /// leave frame threads to x265.
+    #[test]
+    fn x265_parameters() {
+        assert_eq!(
+            x265_params(28, Some(2)),
+            "pools=28:frame-threads=2:repeat-headers=1:log-level=error"
+        );
+        assert_eq!(
+            x265_params(8, None),
+            "pools=8:repeat-headers=1:log-level=error"
+        );
+    }
+
+    #[test]
+    fn card_paths_and_device_names() {
+        assert_eq!(card_job_dir("1727"), "/data/phifmpeg/jobs/1727");
+        assert_eq!(Device::Card(1).to_string(), "card 1");
+        assert_eq!(Device::Host(0).to_string(), "host 0");
+        assert_eq!(Device::Host(1).group(), "host");
+        assert_eq!(Device::Card(0).group(), "card 0");
+        assert!(Device::Host(0).is_host() && !Device::Card(0).is_host());
     }
 }

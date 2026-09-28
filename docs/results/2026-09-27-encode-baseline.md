@@ -88,5 +88,8 @@ Two levers remain and both are needed: more encoder instances per card
 Later the same day: the budget above was measured end to end, with the
 host taking what the cards cannot, in
 [`2026-09-27-cards-and-host-1080p60.md`](2026-09-27-cards-and-host-1080p60.md)
-(cards 19.3 percent of a 5-minute 1080p60 transcode in real time; card
-slots settled at `pools=28`, 513 MB, five per card).
+(cards 19.3 percent of a 5-minute 1080p60 transcode in real time with the
+AVX-512 worker resident on card 1, 31.3 percent with both cards at five
+slots; card slots settled at `pools=28`, 513 MB, five per card). The
+vector-unit lever was set aside the same day ([design](../design.md)): the
+cards run C, and the SIMD ratios above are kept for reference.

@@ -57,9 +57,13 @@ whatever the card is still on and touches `stop`.
 | card that fits none | one small slot, `pools=14` (414 MB peak) | 1 if `--small-slot-mb` fits |
 | host | 4 decode threads, x265 `pools=--host-pool` | `--host-slots` |
 
-Card: `build/c/ffmpeg` (C only), installed with the runner at
-`/data/phifmpeg/bin/` when the SHA-256 differs. Host: `build/host/ffmpeg`
-(all SIMD). Both are FFmpeg n9.0.2 with x265 4.2.
+Card: the build root's `build/c/ffmpeg` (C only) and the runner from
+`card/target/x86_64-knc-linux-musl/release`, both installed under
+`/data/phifmpeg/bin/` on the card when the SHA-256 there differs. Host: the
+build root's `build/host/ffmpeg` (all SIMD). Both are FFmpeg n9.0.2 with
+x265 4.2. The card's thread counts (2 decode threads, 2 x265 frame
+threads) and the host's (4 decode threads) are constants at the top of the
+module; the pool sizes are options.
 
 ## Report
 

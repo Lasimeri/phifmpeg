@@ -101,3 +101,7 @@ alignment padding), which the stack treats as suspect on this card.
 This is the static upper bound. `-cpuflags` decides which ISA level
 FFmpeg dispatches to, so what the translator must cover is the set of
 functions a real decode reaches at the chosen level, measured next.
+
+Later the same day the vector-unit stage was set aside and the `asm`
+variant removed ([design](../design.md)); the audit above stays as the
+record of what FFmpeg's x86 assembly would have needed. The cards run C.

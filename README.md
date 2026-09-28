@@ -67,7 +67,9 @@ The input needs closed GOPs (every keyframe an IDR); `--latency`
 (default 150 s) is the real-time budget and must exceed what a card needs
 for one segment (about 70 s for 2 s of 1080p60 at ultrafast).
 
-Build trees go to `build/` (or `PHIFMPEG_BUILD`), several GB.
+Build trees go to `build/` (or `PHIFMPEG_BUILD`), several GB. `make check`
+runs everything that needs no card (docs, format, lint, build, unit tests,
+both workspaces); `make help` lists the rest.
 
 ## The repositories
 
