@@ -7,9 +7,9 @@ The build root and what lives under it:
 | `src/ffmpeg`, `src/x265` | the pristine checkouts | `fetch` |
 | `src/nasm-<version>` | nasm's unpacked source | `fetch` |
 | `downloads/` | tarballs, checked against `pins.toml` | `fetch` |
-| `tools/bin/nasm` | the host assembler the `asm` and `host` variants need | `fetch` |
+| `tools/bin/nasm` | the host assembler the `host` variant needs | `fetch` |
 | `prefix/<variant>` | x265 installed for a variant (`libx265.a`, headers, `x265.pc`) | `build` |
-| `build/<variant>` | out-of-tree FFmpeg builds (`c`, `asm`, `host`); `ffmpeg_g` is the unstripped binary, `ffmpeg` the stripped one | `build` |
+| `build/<variant>` | out-of-tree FFmpeg builds (`c`, `host`); `ffmpeg_g` is the unstripped binary, `ffmpeg` the stripped one | `build` |
 | `build/x265-<variant>` | out-of-tree x265 builds, with the `x265` CLI | `build` |
 | `phix-build.log` | the last card workspace build | `build` (card variants) |
 | `jobs/<job>/` | one transcode: `in/` (segments), `out/` (encoded segments, one file per device), `segments.txt` (the concat list), `segments.log` (the per-segment report) | `transcode` |

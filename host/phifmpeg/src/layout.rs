@@ -60,7 +60,7 @@ impl Layout {
         self.root.join("tools")
     }
 
-    /// An out-of-tree build directory: `c`, `asm`, `host` for FFmpeg,
+    /// An out-of-tree build directory: `c`, `host` for FFmpeg,
     /// `x265-<variant>` for x265.
     pub fn variant(&self, name: &str) -> PathBuf {
         self.root.join("build").join(name)

@@ -1,24 +1,17 @@
 //! `phifmpeg build`: x265 and FFmpeg from the pristine trees, with
 //! build-system flags as the only input.
 //!
-//! Three variants; each builds x265 into `<build>/prefix/<name>` and FFmpeg
+//! Two variants; each builds x265 into `<build>/prefix/<name>` and FFmpeg
 //! (linked with that libx265) out of tree in `<build>/build/<name>`:
 //!
-//! - `c` (card): no assembly at all. Every instruction is one the card
-//!   executes; the stack's `phi-isa-audit` must report zero illegal
-//!   instructions or the build fails. This is what `transcode` runs on the
-//!   cards.
-//! - `asm` (card): FFmpeg's and x265's own x86 SIMD (SSE2 to AVX2)
-//!   assembled with nasm. The card has none of those instructions, so this
-//!   build does not run there as it is; it exists for the vector-unit work
-//!   and its audit is printed as a report, not enforced.
+//! - `c` (the cards): no assembly at all, FFmpeg's inline assembly
+//!   included. Every instruction is one the card executes; the stack's
+//!   `phi-isa-audit` must report zero illegal instructions or the build
+//!   fails. It also builds the card workspace (`card/`: the `phix` runtime,
+//!   linked into both binaries by reference, and the `phifmpeg-card`
+//!   runner). This is what `transcode` runs on the cards.
 //! - `host`: a native build for the host with all of both projects' SIMD
 //!   and FFmpeg's inline assembly; the host's share of a transcode runs it.
-//!
-//! The card variants also build the card workspace (`card/`: the `phix`
-//! runtime linked into both binaries by reference, and the `phifmpeg-card`
-//! runner) and disable FFmpeg's inline assembly, which sits inside C
-//! functions (CABAC uses CMOV there).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -35,10 +28,8 @@ use crate::stack::Stack;
 /// Which build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Variant {
-    /// Card: C only, audited clean.
+    /// The cards: C only, audited clean, with the card workspace.
     C,
-    /// Card: with FFmpeg's and x265's x86 assembly, for the vector-unit work.
-    Asm,
     /// For the host itself, with all of both projects' SIMD: the host's
     /// share of a split transcode runs the same pinned sources as the cards.
     Host,
@@ -49,7 +40,6 @@ impl Variant {
     pub fn name(self) -> &'static str {
         match self {
             Variant::C => "c",
-            Variant::Asm => "asm",
             Variant::Host => "host",
         }
     }
@@ -94,7 +84,7 @@ fn x265_args(
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| tool.to_string())
     };
-    let mut a = vec![
+    vec![
         "-G".into(),
         "Ninja".into(),
         "-DCMAKE_BUILD_TYPE=Release".into(),
@@ -117,19 +107,14 @@ fn x265_args(
         ),
         // No libnuma in the card sysroot (one node anyway).
         "-DENABLE_LIBNUMA=OFF".into(),
-    ];
-    match v {
-        Variant::C => a.push("-DENABLE_ASSEMBLY=OFF".into()),
-        Variant::Asm | Variant::Host => {
-            a.push("-DENABLE_ASSEMBLY=ON".into());
-            a.push(nasm);
-        }
-    }
-    a
+        // The card has none of x265's x86 SIMD instructions.
+        "-DENABLE_ASSEMBLY=OFF".into(),
+    ]
 }
 
-/// FFmpeg configure arguments for a variant.
-fn configure_args(v: Variant, lay: &Layout, dir: &Path, phix: Option<&Path>) -> Vec<String> {
+/// FFmpeg configure arguments: the card's when `phix` (the card runtime's
+/// directory) is given, the host's otherwise.
+fn configure_args(lay: &Layout, dir: &Path, phix: Option<&Path>) -> Vec<String> {
     let nasm = format!("--x86asmexe={}", lay.tools().join("bin/nasm").display());
     let Some(phix) = phix else {
         // The host variant: native, SIMD and inline assembly on, x265 from
@@ -148,7 +133,7 @@ fn configure_args(v: Variant, lay: &Layout, dir: &Path, phix: Option<&Path>) -> 
             nasm,
         ];
     };
-    let mut a: Vec<String> = vec![
+    vec![
         format!("--prefix={}", dir.join("install").display()),
         // Cross build: the card is x86-64 Linux, but configure must not run
         // what it builds as if the host were the target.
@@ -182,19 +167,15 @@ fn configure_args(v: Variant, lay: &Layout, dir: &Path, phix: Option<&Path>) -> 
         "--disable-doc".into(),
         "--enable-pthreads".into(),
         "--enable-zlib".into(),
+        // The card has none of FFmpeg's x86 SIMD instructions; inline
+        // assembly also sits inside C functions (CABAC's uses CMOV).
+        "--disable-asm".into(),
+        "--disable-x86asm".into(),
         "--disable-inline-asm".into(),
         // libx265 is GPL, so the FFmpeg binary is too.
         "--enable-gpl".into(),
         "--enable-libx265".into(),
-    ];
-    match v {
-        Variant::C => {
-            a.push("--disable-asm".into());
-            a.push("--disable-x86asm".into());
-        }
-        Variant::Asm | Variant::Host => a.push(nasm),
-    }
-    a
+    ]
 }
 
 /// Run a command with the toolchain environment, output to a log file.
@@ -280,6 +261,12 @@ fn build_phix(
     Ok(dir)
 }
 
+/// True when `out` exists and was modified before `input`.
+fn older_than(out: &Path, input: &Path) -> bool {
+    let m = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    matches!((m(out), m(input)), (Some(o), Some(i)) if o < i)
+}
+
 /// Reconfigure only when the argument list changed (kept in `flags_file`).
 fn needs_configure(flags_file: &Path, args: &[String], marker: &Path) -> bool {
     let have = std::fs::read_to_string(flags_file).unwrap_or_default();
@@ -331,7 +318,7 @@ fn build_x265(
 pub fn build(stack: &Stack, repo: &Path, lay: &Layout, pins: &Pins, v: Variant) -> Result<PathBuf> {
     pristine("ffmpeg", &pins.ffmpeg, &lay.ffmpeg_src())?;
     pristine("x265", &pins.x265, &lay.x265_src())?;
-    if v == Variant::Asm && !lay.tools().join("bin/nasm").is_file() {
+    if v == Variant::Host && !lay.tools().join("bin/nasm").is_file() {
         bail!(
             "nasm missing in {}; run `phifmpeg fetch`",
             lay.tools().display()
@@ -355,6 +342,24 @@ pub fn build(stack: &Stack, repo: &Path, lay: &Layout, pins: &Pins, v: Variant) 
             &lay.root.join("phix-build.log"),
         )?)
     };
+    if let Some(dir) = &phix {
+        // Neither FFmpeg's Makefile nor x265's Ninja files know that the
+        // binaries depend on libphix.a (it comes in through link flags), so
+        // a rebuilt library would leave stale binaries: remove the older
+        // ones and let the build link them again.
+        let lib = dir.join("libphix.a");
+        let ff = lay.variant(v.name());
+        let x = lay.variant(&format!("x265-{}", v.name()));
+        for out in ["ffmpeg_g", "ffmpeg", "ffprobe_g", "ffprobe"]
+            .iter()
+            .map(|n| ff.join(n))
+            .chain([x.join("x265")])
+        {
+            if older_than(&out, &lib) {
+                let _ = std::fs::remove_file(&out);
+            }
+        }
+    }
     build_x265(lay, &env, v, phix.as_deref())?;
     env.insert(
         "PKG_CONFIG_LIBDIR".into(),
@@ -367,7 +372,7 @@ pub fn build(stack: &Stack, repo: &Path, lay: &Layout, pins: &Pins, v: Variant) 
 
     let dir = lay.variant(v.name());
     std::fs::create_dir_all(&dir)?;
-    let args = configure_args(v, lay, &dir, phix.as_deref());
+    let args = configure_args(lay, &dir, phix.as_deref());
     let flags_file = dir.join("phifmpeg.flags");
     if needs_configure(&flags_file, &args, &dir.join("ffbuild/config.mak")) {
         println!("== configuring ffmpeg {} in {}", v.name(), dir.display());
@@ -394,30 +399,20 @@ pub fn build(stack: &Stack, repo: &Path, lay: &Layout, pins: &Pins, v: Variant) 
     if host {
         return Ok(bin);
     }
-    audit(stack, &bin, v)?;
+    audit(stack, &bin)?;
     audit(
         stack,
         &lay.variant(&format!("x265-{}", v.name())).join("x265"),
-        v,
     )?;
     Ok(bin)
 }
 
-/// Run the stack's ISA audit. Enforced for `c`, reported for `asm`; the
-/// host variant is not audited (the host executes everything).
-pub fn audit(stack: &Stack, bin: &Path, v: Variant) -> Result<()> {
-    let tool = stack.isa_audit()?;
+/// Run the stack's ISA audit on a card binary; any instruction the card
+/// cannot execute fails the build. (The host variant is not audited: the
+/// host executes everything.)
+pub fn audit(stack: &Stack, bin: &Path) -> Result<()> {
     println!("== phi-isa-audit {}", bin.display());
-    let mut cmd = Command::new(tool);
-    cmd.arg(bin);
-    match v {
-        Variant::C => run(&mut cmd),
-        Variant::Asm | Variant::Host => {
-            // Hits are expected: the SIMD functions. Report them.
-            let _ = cmd.status();
-            Ok(())
-        }
-    }
+    run(Command::new(stack.isa_audit()?).arg(bin))
 }
 
 #[cfg(test)]
@@ -434,25 +429,24 @@ mod tests {
     }
 
     #[test]
-    fn card_variants_cross_compile_and_link_phix() {
-        let phix = Path::new("/p");
-        for v in [Variant::C, Variant::Asm] {
-            let a = configure_args(v, &lay(), Path::new("/d"), Some(phix));
-            assert!(a.contains(&"--cc=knc-cc".to_string()));
-            assert!(a.contains(&"--disable-inline-asm".to_string()));
-            assert!(a.iter().any(|x| x.contains("--undefined=phix_anchor")));
-            assert!(a.contains(&"--extra-libs=-lphix -lc++abi -lunwind".to_string()));
+    fn card_build_cross_compiles_without_assembly_and_links_phix() {
+        let a = configure_args(&lay(), Path::new("/d"), Some(Path::new("/p")));
+        for f in [
+            "--cc=knc-cc",
+            "--disable-asm",
+            "--disable-x86asm",
+            "--disable-inline-asm",
+            "--extra-libs=-lphix -lc++abi -lunwind",
+        ] {
+            assert!(a.contains(&f.to_string()), "missing {f}");
         }
-        let c = configure_args(Variant::C, &lay(), Path::new("/d"), Some(phix));
-        assert!(c.contains(&"--disable-asm".to_string()));
-        let asm = configure_args(Variant::Asm, &lay(), Path::new("/d"), Some(phix));
-        assert!(!asm.contains(&"--disable-asm".to_string()));
-        assert!(asm.iter().any(|x| x.starts_with("--x86asmexe=")));
+        assert!(a.iter().any(|x| x.contains("--undefined=phix_anchor")));
+        assert!(!a.iter().any(|x| x.starts_with("--x86asmexe=")));
     }
 
     #[test]
     fn host_variant_is_native() {
-        let a = configure_args(Variant::Host, &lay(), Path::new("/d"), None);
+        let a = configure_args(&lay(), Path::new("/d"), None);
         assert!(!a.iter().any(|x| x.contains("knc") || x.contains("cross")));
         assert!(!a.contains(&"--disable-inline-asm".to_string()));
         let x = x265_args(Variant::Host, &lay(), &HashMap::new(), None);
@@ -461,14 +455,26 @@ mod tests {
     }
 
     #[test]
-    fn x265_assembly_follows_the_variant() {
-        let env = HashMap::new();
-        let p = Some(Path::new("/p"));
-        assert!(
-            x265_args(Variant::C, &lay(), &env, p).contains(&"-DENABLE_ASSEMBLY=OFF".to_string())
-        );
-        assert!(
-            x265_args(Variant::Asm, &lay(), &env, p).contains(&"-DENABLE_ASSEMBLY=ON".to_string())
-        );
+    fn older_than_compares_modification_times() {
+        let d = std::env::temp_dir().join(format!("phifmpeg-test-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let (a, b) = (d.join("a"), d.join("b"));
+        let t0 = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        for (p, dt) in [(&a, 0u64), (&b, 10)] {
+            let f = std::fs::File::create(p).unwrap();
+            f.set_modified(t0 + std::time::Duration::from_secs(dt))
+                .unwrap();
+        }
+        assert!(super::older_than(&a, &b));
+        assert!(!super::older_than(&b, &a));
+        assert!(!super::older_than(&d.join("missing"), &b));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn x265_for_the_card_has_no_assembly_and_links_phix() {
+        let x = x265_args(Variant::C, &lay(), &HashMap::new(), Some(Path::new("/p")));
+        assert!(x.contains(&"-DENABLE_ASSEMBLY=OFF".to_string()));
+        assert!(x.iter().any(|a| a.contains("--undefined=phix_anchor")));
     }
 }

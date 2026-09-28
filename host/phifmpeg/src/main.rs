@@ -60,8 +60,8 @@ enum Cmd {
     /// Build x265 and FFmpeg (build flags only): for the card, with the card
     /// workspace, audited; or for the host.
     Build {
-        /// `c` (card, no assembly, audited clean), `asm` (card, both projects'
-        /// x86 SIMD in, for the vector-unit work) or `host` (native, all SIMD).
+        /// `c` (the cards: no assembly, audited clean) or `host` (native, all
+        /// SIMD).
         #[arg(long, value_enum, default_value = "c")]
         variant: Variant,
     },

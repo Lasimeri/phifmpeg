@@ -1,6 +1,6 @@
 [package]
 name = "phix"
-description = "Card-side runtime linked into the unmodified FFmpeg and x265: profiler now, vector-unit translation next"
+description = "Card-side runtime linked into the unmodified FFmpeg and x265: a sampling profiler"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"

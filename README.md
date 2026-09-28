@@ -10,7 +10,7 @@ cards take every part they can finish in time and the host does the rest.
   input, and the build refuses a tree that differs from the pinned commit.
 - **Everything around them is Rust**: the host command that builds,
   schedules and verifies; the card runner; the card-side runtime library
-  (a profiler today, the vector unit next).
+  (a sampling profiler).
 - **The cards are co-processors.** `phifmpeg transcode` cuts the video at
   keyframes, gives each segment to a card when the card can finish it
   before its real-time deadline, and to the host otherwise; the host also
@@ -30,8 +30,8 @@ repository builds on that and copies nothing from it.
 | x265 4.2 (HEVC encoder) for the card, C only | builds, audit clean; linked into FFmpeg as `libx265` |
 | **real-time 1080p60 transcode, cards + host** | **`phifmpeg transcode`: 5 min of BBB 1080p60, 0 deadline misses, cards encoded 19.3% (card 0 16.0%, card 1 3.3%), host the rest; output verified (decodes clean, card and host encodes of the same segment within 0.06 dB)** |
 | card 0 alone, C only | about 9.3 fps of 1080p60 ultrafast (5 encoder slots, memory-bound) |
-| FFmpeg and x265 with their x86 SIMD, for the vector unit | builds; the card lacks those instructions |
-| vector unit | next lever: x265's SSE2 code is 3x its C code on the host, and a dozen of its pixel functions take about 80% of a card encode |
+| where a card spends an encode | a dozen x265 pixel functions take about 80% of it |
+| vector unit | not used (not pursued, 2026-09-27); the cards run C |
 
 Numbers and how they were checked: [decode](docs/results/2026-09-27-c-baseline.md), [encode and the 1080p60 budget](docs/results/2026-09-27-encode-baseline.md), [cards and host together](docs/results/2026-09-27-cards-and-host-1080p60.md), [where a card spends an encode](docs/results/2026-09-27-card-profile.md).
 How the pieces fit and why: [`docs/design.md`](docs/design.md).

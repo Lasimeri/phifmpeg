@@ -3,7 +3,7 @@
 //! FFmpeg and x265 are cloned at their pinned tags and must peel to the
 //! pinned commits with no local changes; [`pristine`] is also the guard
 //! every build runs, so an edited tree can never be built by accident.
-//! nasm assembles FFmpeg's and x265's own x86 sources for the `asm`
+//! nasm assembles FFmpeg's and x265's own x86 sources for the `host`
 //! variant; it is built from a SHA-256-checked tarball into the build root,
 //! so nothing is installed on the host.
 
