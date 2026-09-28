@@ -50,7 +50,7 @@ impl Layout {
         self.root.join("downloads")
     }
 
-    /// Unpacked third-party sources other than FFmpeg.
+    /// Unpacked tarball sources (nasm); the git checkouts have their own.
     pub fn src(&self, name: &str) -> PathBuf {
         self.root.join("src").join(name)
     }
@@ -60,7 +60,8 @@ impl Layout {
         self.root.join("tools")
     }
 
-    /// Out-of-tree FFmpeg build for one variant.
+    /// An out-of-tree build directory: `c`, `asm`, `host` for FFmpeg,
+    /// `x265-<variant>` for x265.
     pub fn variant(&self, name: &str) -> PathBuf {
         self.root.join("build").join(name)
     }

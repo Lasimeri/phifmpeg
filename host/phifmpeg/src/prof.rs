@@ -113,3 +113,21 @@ fn demangle(name: &str) -> String {
     }
     name.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::demangle;
+
+    #[test]
+    fn names() {
+        assert_eq!(
+            demangle("ff_hevc_hls_residual_coding"),
+            "ff_hevc_hls_residual_coding"
+        );
+        // A real symbol from the card build, as llvm-cxxfilt prints it.
+        assert_eq!(
+            demangle("_ZN4x26510ThreadPool11getCpuCountEv"),
+            "x265::ThreadPool::getCpuCount()"
+        );
+    }
+}

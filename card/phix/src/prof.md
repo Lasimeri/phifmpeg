@@ -24,3 +24,9 @@ non-PIE binary an address needs no load offset.
 
 Read the result with `phifmpeg prof <binary> <file>` on the host, against
 the unstripped binary that ran (`ffmpeg_g`, the x265 CLI).
+
+Observed on card 0 (2026-09-27, [card profile](../../../docs/results/2026-09-27-card-profile.md)):
+31,443 samples for 568 s of CPU at the 10 ms default, about one per 18 ms.
+The process-wide timer appears to deliver at most one signal per check, so
+some expiries coalesce; shares are read as if the loss favours no
+function, which has not been checked.

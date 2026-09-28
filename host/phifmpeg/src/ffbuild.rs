@@ -1,20 +1,24 @@
-//! `phifmpeg build`: x265 and FFmpeg for the card, from the pristine trees,
-//! with build-system flags as the only input.
+//! `phifmpeg build`: x265 and FFmpeg from the pristine trees, with
+//! build-system flags as the only input.
 //!
-//! Two variants; each builds x265 into `<build>/prefix/<name>` and FFmpeg
+//! Three variants; each builds x265 into `<build>/prefix/<name>` and FFmpeg
 //! (linked with that libx265) out of tree in `<build>/build/<name>`:
 //!
-//! - `c`: no assembly at all. Every instruction is one the card executes;
-//!   the stack's `phi-isa-audit` must report zero illegal instructions or the
-//!   build fails. This is the reference and the fallback.
-//! - `asm`: FFmpeg's and x265's own x86 SIMD (SSE2 to AVX2) assembled with
-//!   nasm. The card has none of those instructions, so they only run through
-//!   the translator; the audit is reported, not enforced, because the hits
-//!   are expected and must all sit inside the two projects' SIMD functions.
+//! - `c` (card): no assembly at all. Every instruction is one the card
+//!   executes; the stack's `phi-isa-audit` must report zero illegal
+//!   instructions or the build fails. This is what `transcode` runs on the
+//!   cards.
+//! - `asm` (card): FFmpeg's and x265's own x86 SIMD (SSE2 to AVX2)
+//!   assembled with nasm. The card has none of those instructions, so this
+//!   build does not run there as it is; it exists for the vector-unit work
+//!   and its audit is printed as a report, not enforced.
+//! - `host`: a native build for the host with all of both projects' SIMD
+//!   and FFmpeg's inline assembly; the host's share of a transcode runs it.
 //!
-//! FFmpeg's inline assembly is off in both: it is embedded in C functions
-//! (CABAC uses CMOV there), where no function boundary exists to translate
-//! at.
+//! The card variants also build the card workspace (`card/`: the `phix`
+//! runtime linked into both binaries by reference, and the `phifmpeg-card`
+//! runner) and disable FFmpeg's inline assembly, which sits inside C
+//! functions (CABAC uses CMOV there).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -31,9 +35,9 @@ use crate::stack::Stack;
 /// Which build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Variant {
-    /// C only, audited clean.
+    /// Card: C only, audited clean.
     C,
-    /// With FFmpeg's and x265's x86 assembly, for the translator.
+    /// Card: with FFmpeg's and x265's x86 assembly, for the vector-unit work.
     Asm,
     /// For the host itself, with all of both projects' SIMD: the host's
     /// share of a split transcode runs the same pinned sources as the cards.
@@ -211,9 +215,10 @@ fn logged(cmd: &mut Command, env: &HashMap<String, String>, log: &Path, what: &s
 
 /// Build the card workspace (`card/phix`, the runtime linked into FFmpeg
 /// and x265, and `card/runner`, the transcode runner) for the stack's card
-/// target and return the directory holding `libphix.a` and `phifmpeg-card`. Always from clean: cargo's
-/// fingerprints do not cover the patched LLVM library rustc loads (the
-/// stack's ADR 0007), so a rebuilt LLVM would otherwise leave stale objects.
+/// target and return the directory holding `libphix.a` and
+/// `phifmpeg-card`. Always from clean: cargo's fingerprints do not cover
+/// the patched LLVM library rustc loads (the stack's ADR 0007), so a
+/// rebuilt LLVM would otherwise leave stale objects.
 fn build_phix(
     stack: &Stack,
     repo: &Path,
@@ -320,8 +325,9 @@ fn build_x265(
     )
 }
 
-/// Build x265 and FFmpeg for one variant and audit the result. Returns the
-/// unstripped `ffmpeg_g`.
+/// Build x265 and FFmpeg for one variant (for a card variant, the card
+/// workspace first) and audit the card variants. Returns the unstripped
+/// `ffmpeg_g`.
 pub fn build(stack: &Stack, repo: &Path, lay: &Layout, pins: &Pins, v: Variant) -> Result<PathBuf> {
     pristine("ffmpeg", &pins.ffmpeg, &lay.ffmpeg_src())?;
     pristine("x265", &pins.x265, &lay.x265_src())?;
@@ -397,7 +403,8 @@ pub fn build(stack: &Stack, repo: &Path, lay: &Layout, pins: &Pins, v: Variant) 
     Ok(bin)
 }
 
-/// Run the stack's ISA audit. Enforced for `c`, reported for `asm`.
+/// Run the stack's ISA audit. Enforced for `c`, reported for `asm`; the
+/// host variant is not audited (the host executes everything).
 pub fn audit(stack: &Stack, bin: &Path, v: Variant) -> Result<()> {
     let tool = stack.isa_audit()?;
     println!("== phi-isa-audit {}", bin.display());
@@ -410,5 +417,58 @@ pub fn audit(stack: &Stack, bin: &Path, v: Variant) -> Result<()> {
             let _ = cmd.status();
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{configure_args, x265_args, Variant};
+    use crate::layout::Layout;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+
+    fn lay() -> Layout {
+        Layout {
+            root: PathBuf::from("/b"),
+        }
+    }
+
+    #[test]
+    fn card_variants_cross_compile_and_link_phix() {
+        let phix = Path::new("/p");
+        for v in [Variant::C, Variant::Asm] {
+            let a = configure_args(v, &lay(), Path::new("/d"), Some(phix));
+            assert!(a.contains(&"--cc=knc-cc".to_string()));
+            assert!(a.contains(&"--disable-inline-asm".to_string()));
+            assert!(a.iter().any(|x| x.contains("--undefined=phix_anchor")));
+            assert!(a.contains(&"--extra-libs=-lphix -lc++abi -lunwind".to_string()));
+        }
+        let c = configure_args(Variant::C, &lay(), Path::new("/d"), Some(phix));
+        assert!(c.contains(&"--disable-asm".to_string()));
+        let asm = configure_args(Variant::Asm, &lay(), Path::new("/d"), Some(phix));
+        assert!(!asm.contains(&"--disable-asm".to_string()));
+        assert!(asm.iter().any(|x| x.starts_with("--x86asmexe=")));
+    }
+
+    #[test]
+    fn host_variant_is_native() {
+        let a = configure_args(Variant::Host, &lay(), Path::new("/d"), None);
+        assert!(!a.iter().any(|x| x.contains("knc") || x.contains("cross")));
+        assert!(!a.contains(&"--disable-inline-asm".to_string()));
+        let x = x265_args(Variant::Host, &lay(), &HashMap::new(), None);
+        assert!(x.contains(&"-DENABLE_ASSEMBLY=ON".to_string()));
+        assert!(!x.iter().any(|a| a.contains("CMAKE_SYSTEM_NAME")));
+    }
+
+    #[test]
+    fn x265_assembly_follows_the_variant() {
+        let env = HashMap::new();
+        let p = Some(Path::new("/p"));
+        assert!(
+            x265_args(Variant::C, &lay(), &env, p).contains(&"-DENABLE_ASSEMBLY=OFF".to_string())
+        );
+        assert!(
+            x265_args(Variant::Asm, &lay(), &env, p).contains(&"-DENABLE_ASSEMBLY=ON".to_string())
+        );
     }
 }

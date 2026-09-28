@@ -6,8 +6,8 @@
 //! no re-encode). Segments then arrive at the pace of the video itself, as
 //! a live source would deliver them, and each has a deadline: its end time
 //! in the video plus a fixed latency (`--latency`, like a broadcast delay).
-//! A segment goes to the card slot that, at that card's measured speed,
-//! would finish it earliest, if that is before the deadline; otherwise to
+//! A segment goes to an idle card slot if that card's measured speed, times
+//! a safety factor, says it will finish before the deadline; otherwise to
 //! the host. If a card segment has not finished by the last moment at which
 //! the host could still make the deadline, the host encodes a backup copy;
 //! whichever finishes first is kept and the other is stopped. So the cards
@@ -51,8 +51,10 @@ pub struct Opts {
     /// Cards to use.
     #[arg(long, value_delimiter = ',', default_value = "0,1")]
     pub cards: Vec<u32>,
-    /// Encoder slots per card; default: as many as the card's free memory
-    /// holds at `--slot-mb` each.
+    /// Encoder slots per card, each with `--card-pool` threads. Default: as
+    /// many as the card's free memory holds at `--slot-mb` each, at most
+    /// `--max-card-slots`; a card with room for none gets one small slot if
+    /// `--small-slot-mb` fits.
     #[arg(long)]
     pub card_slots: Option<usize>,
     /// Memory one card slot needs, in MiB (measured peak 513 MiB for 1080p
@@ -898,4 +900,19 @@ fn report(sh: &Shared, wall: f64, total: u64, cards: &[(u32, usize)]) -> Result<
         sh.dir.join("segments.log").display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_rate;
+
+    #[test]
+    fn frame_rates() {
+        assert_eq!(parse_rate("60/1").unwrap(), 60.0);
+        assert!((parse_rate("30000/1001").unwrap() - 29.97).abs() < 0.01);
+        assert_eq!(parse_rate("25").unwrap(), 25.0);
+        assert!(parse_rate("0/0").is_err());
+        assert!(parse_rate("60/0").is_err());
+        assert!(parse_rate("x/1").is_err());
+    }
 }

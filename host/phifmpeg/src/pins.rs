@@ -38,3 +38,23 @@ impl Pins {
         toml::from_str(&text).with_context(|| format!("parsing {}", p.display()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Pins;
+    use std::path::Path;
+
+    /// The repository's own pins parse, and every pin is complete.
+    #[test]
+    fn repository_pins() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let p = Pins::load(&repo).unwrap();
+        for g in [&p.ffmpeg, &p.x265] {
+            assert_eq!(g.commit.len(), 40, "{} commit", g.repo);
+            assert!(g.commit.chars().all(|c| c.is_ascii_hexdigit()));
+            assert!(!g.tag.is_empty());
+        }
+        assert_eq!(p.nasm.sha256.len(), 64);
+        assert!(p.nasm.url.ends_with(".tar.xz"));
+    }
+}

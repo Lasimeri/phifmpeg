@@ -7,12 +7,14 @@ sections are the same in every repository of the family (see
 
 ## Languages
 
-- **Rust** for everything written here: the host command (`host/`) and the
-  card-side translator and launcher (`card/`, built for the stack's
-  `x86_64-knc-linux-musl` target).
-- **FFmpeg is never modified.** Not a patch, not a new file inside its
-  tree. What it needs is expressed as configure flags, link flags, or
-  runtime options it already has (`-cpuflags`, `-threads`).
+- **Rust** for everything written here: the host command (`host/`), and the
+  card workspace (`card/`, built for the stack's `x86_64-knc-linux-musl`
+  target): the `phix` runtime library (`no_std`) and the `phifmpeg-card`
+  runner (`std`).
+- **FFmpeg and x265 are never modified.** Not a patch, not a new file
+  inside their trees. What they need is expressed as build flags (FFmpeg's
+  configure, x265's CMake), link flags, or runtime options they already
+  have (FFmpeg's `-threads`, x265's `pools`, `frame-threads`).
 - **Shell** only for `scripts/check-docs.sh`, the family's shared
   repository-hygiene script.
 - **Never Python or JavaScript** for anything here.
@@ -39,11 +41,16 @@ sections are the same in every repository of the family (see
   section, a file and function in a named source tree, or a measurement
   made on this machine with the command shown.
 - Results go under `docs/results/` with the date, the host kernel, and the
-  exact command. Every speed number is verified, not only timed: decoded
-  frames match the host's frame hashes, and the run says which card, how
-  many threads, and whether the vector unit did the work.
+  exact command. Every speed number is verified, not only timed: a decode
+  matches the host's frame hashes exactly; an encode decodes clean with
+  every frame and matches the host's encode of the same input in PSNR;
+  and the run says which card, how many slots and threads, and which
+  device did which part.
 - On a card, every phifmpeg process runs with `oom_score_adj` 1000, so a
-  memory shortage ends FFmpeg and never a sibling's resident worker.
+  memory shortage ends an encoder and never a sibling's resident worker.
+- `make check` (docs, format, lint, build, unit tests) needs no card.
+  What needs one is run by hand against a card that is up (`phifmpeg
+  transcode`, the card profiler) and recorded under `docs/results/`.
 
 ## The family
 

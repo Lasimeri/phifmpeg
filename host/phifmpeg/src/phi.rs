@@ -2,8 +2,10 @@
 //!
 //! Only the verbs the stack documents as its interface (`put`, `get`,
 //! `run`, all with `-c N`) are used, through `<stack>/scripts/phi.sh`.
-//! `run` passes the card command's exit status back, and several `run`s on
-//! one card execute concurrently (measured: three 5 s sleeps took 5.6 s).
+//! `run` passes the card command's exit status back. The stack's daemon
+//! serves one session per card at a time (three concurrent 5 s `run`s take
+//! 15.1 s), so a caller must never hold a long `run` while it needs `put`
+//! or `get` on the same card; `transcode` goes through the card runner.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

@@ -25,15 +25,15 @@ repository builds on that and copies nothing from it.
 
 | | |
 | --- | --- |
-| FFmpeg n9.0.2 for the card, C only | builds, ISA audit clean (4.49 M instructions, 0 illegal) |
+| FFmpeg n9.0.2 with libx265 for the card, C only | builds, ISA audit clean (5.11 M instructions with libx265 and phix linked, 0 illegal; x265 CLI 0.61 M, 0 illegal) |
 | HEVC decode on card 0 | **bit-exact** (300/300 frame hashes match the host); 1080p30 at **29.8 fps** with 228 threads, 25.2 with 114 |
 | x265 4.2 (HEVC encoder) for the card, C only | builds, audit clean; linked into FFmpeg as `libx265` |
 | **real-time 1080p60 transcode, cards + host** | **`phifmpeg transcode`: 5 min of BBB 1080p60, 0 deadline misses, cards encoded 19.3% (card 0 16.0%, card 1 3.3%), host the rest; output verified (decodes clean, card and host encodes of the same segment within 0.06 dB)** |
 | card 0 alone, C only | about 9.3 fps of 1080p60 ultrafast (5 encoder slots, memory-bound) |
 | FFmpeg and x265 with their x86 SIMD, for the vector unit | builds; the card lacks those instructions |
-| vector unit | next lever: x265's SSE2 code is 3x its C code on the host |
+| vector unit | next lever: x265's SSE2 code is 3x its C code on the host, and a dozen of its pixel functions take about 80% of a card encode |
 
-Numbers and how they were checked: [decode](docs/results/2026-09-27-c-baseline.md), [encode and the 1080p60 budget](docs/results/2026-09-27-encode-baseline.md), [cards and host together](docs/results/2026-09-27-cards-and-host-1080p60.md).
+Numbers and how they were checked: [decode](docs/results/2026-09-27-c-baseline.md), [encode and the 1080p60 budget](docs/results/2026-09-27-encode-baseline.md), [cards and host together](docs/results/2026-09-27-cards-and-host-1080p60.md), [where a card spends an encode](docs/results/2026-09-27-card-profile.md).
 How the pieces fit and why: [`docs/design.md`](docs/design.md).
 
 For scale, the same decode on the host: 596 fps with FFmpeg's own SIMD,
@@ -42,9 +42,17 @@ real time, with the host's CPU left free.
 
 ## Build
 
-Requirements: Intel-Phi-3120A with its toolchain built (its
-`docs/reproducibility.md`, through the P2 toolchain stage, including LLVM
-patch 0010) and a card up for anything that runs. Then, in this checkout:
+Requirements:
+
+- Intel-Phi-3120A with its toolchain built (its `docs/reproducibility.md`
+  through the toolchain stage, including LLVM patch 0010 and the `dylib`
+  LLVM variant that rustc loads for the card target), its `phi-isa-audit`
+  built (`make build` there), and a card up for anything that runs.
+- On the host: Rust with `rust-src` (the card crates build `std` from
+  source), a C and C++ compiler, `make`, `cmake`, `ninja`, `pkg-config`,
+  `git`, `curl`, `tar`, `bash`.
+
+Then, in this checkout (`make ffmpeg` does the fetch and both builds):
 
 ```
 cargo build
