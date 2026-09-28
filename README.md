@@ -28,8 +28,8 @@ repository builds on that and copies nothing from it.
 | FFmpeg n9.0.2 with libx265 for the card, C only | builds, ISA audit clean (5.11 M instructions with libx265 and phix linked, 0 illegal; x265 CLI 0.61 M, 0 illegal) |
 | HEVC decode on card 0 | **bit-exact** (300/300 frame hashes match the host); 1080p30 at **29.8 fps** with 228 threads, 25.2 with 114 |
 | x265 4.2 (HEVC encoder) for the card, C only | builds, audit clean; linked into FFmpeg as `libx265` |
-| **real-time 1080p60 transcode, cards + host** | **`phifmpeg transcode`: 5 min of BBB 1080p60, 0 deadline misses, cards encoded 19.3% (card 0 16.0%, card 1 3.3%), host the rest; output verified (decodes clean, card and host encodes of the same segment within 0.06 dB)** |
-| card 0 alone, C only | about 9.3 fps of 1080p60 ultrafast (5 encoder slots, memory-bound) |
+| **real-time 1080p60 transcode, cards + host** | **`phifmpeg transcode`: 5 min of BBB 1080p60, 0 deadline misses, the cards encoded 31.3% (card 0 16.7%, card 1 14.7%, five slots each), host the rest; output verified (decodes clean, card and host encodes of the same segment within 0.06 dB). With the AVX-512 worker resident on card 1: 19.3%** |
+| one card, C only | about 9.3 fps of 1080p60 ultrafast (5 encoder slots, memory-bound) |
 | where a card spends an encode | a dozen x265 pixel functions take about 80% of it |
 | vector unit | not used (not pursued, 2026-09-27); the cards run C |
 

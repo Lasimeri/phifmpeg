@@ -56,11 +56,12 @@ scheduling problem, solved in `phifmpeg transcode`
   runs late, so the cards add capacity without ever putting real time at
   risk.
 
-Measured on 5 minutes of 1080p60: the cards encoded 19.3 percent, with no
-missed deadline and no wasted card work
-([results](results/2026-09-27-cards-and-host-1080p60.md)). Their share is
-bounded by their C speed (card 0 about 9 fps) and by card 1's memory, of
-which the AVX-512 worker holds 2.7 GB.
+Measured on 5 minutes of 1080p60: the cards encoded 31.3 percent with both
+free (five slots each), 19.3 percent with the AVX-512 worker resident on
+card 1 (one small slot there), in both cases with no missed deadline and
+no wasted card work ([results](results/2026-09-27-cards-and-host-1080p60.md)).
+Their share is bounded by their C speed (about 9 fps per card) and by the
+memory other work leaves them.
 
 ## The vector unit: not pursued
 
