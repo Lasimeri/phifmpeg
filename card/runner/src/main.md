@@ -23,5 +23,7 @@ choice, ahead of any resident service on the card.
 
 Built by `phifmpeg build` with the rest of `card/` (std from source,
 `knc-cc` as the linker) and audited clean by the stack's `phi-isa-audit`.
-Tested standalone on card 0: one segment claimed, encoded in 37.8 s,
+The protocol is tested on the host with `sh` as the encoder
+([`../tests/protocol.md`](../tests/protocol.md), run by `make test`); on
+card 0 it was tested standalone: one segment claimed, encoded in 37.8 s,
 published, `stop` honoured.

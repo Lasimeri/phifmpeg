@@ -65,6 +65,18 @@ x265 4.2. The card's thread counts (2 decode threads, 2 x265 frame
 threads) and the host's (4 decode threads) are constants at the top of the
 module; the pool sizes are options.
 
+## Tested without a card
+
+The decisions are pure functions with unit tests (`cargo test`):
+`slot_plan` (slots from a card's free memory, with the measured cases: 647
+MiB gives the small slot, 3.6 GiB five), `place` (the fastest idle slot
+that makes the deadline, else none), `learned` and `bounded` (the speed
+estimate's two updates), `parse_done_line` (the runner's `done/` listing)
+and `x265_params`. The runner's side of the protocol is tested on the host
+in [`card/runner/tests/protocol.md`](../../../card/runner/tests/protocol.md).
+The threads, the `phi` sessions and the encoders themselves are exercised
+only by a real transcode.
+
 ## Report
 
 Per segment (written to `segments.log` in the job directory): frames,

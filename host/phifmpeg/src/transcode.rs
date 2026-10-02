@@ -274,21 +274,17 @@ impl Shared {
             .get(&card)
             .unwrap_or(&self.opts.card_fps)
     }
-    /// A finished card segment: move the card's speed halfway to it.
+    /// A finished card segment: the card's speed estimate learns from it.
     fn learn_card(&self, card: u32, fps: f64) {
         if let Some(e) = self.card_fps.lock().unwrap().get_mut(&card) {
-            *e = 0.5 * *e + 0.5 * fps;
+            *e = learned(*e, fps);
         }
     }
     /// A card segment stopped unfinished after running this long: the card
-    /// is at most this fast. Moved 30 percent toward the bound, not onto it:
-    /// taking the minimum (the first version) let one slow segment price a
-    /// card out of every later deadline, and then nothing could correct it.
+    /// is at most this fast.
     fn learn_card_bound(&self, card: u32, fps: f64) {
         if let Some(e) = self.card_fps.lock().unwrap().get_mut(&card) {
-            if fps < *e {
-                *e = 0.7 * *e + 0.3 * fps;
-            }
+            *e = bounded(*e, fps);
         }
     }
     fn host_est(&self, i: usize) -> f64 {
@@ -325,6 +321,100 @@ impl Shared {
     fn card_dir(&self) -> String {
         card_job_dir(&self.job)
     }
+}
+
+/// A speed estimate after a finished segment measured `fps`: halfway there.
+fn learned(est: f64, fps: f64) -> f64 {
+    0.5 * est + 0.5 * fps
+}
+
+/// A speed estimate after a segment stopped unfinished at `fps`, an upper
+/// bound on the card's speed: 30 percent toward it, never onto it. Taking
+/// the minimum (the first version) let one slow segment price a card out of
+/// every later deadline, and then nothing could correct it.
+fn bounded(est: f64, fps: f64) -> f64 {
+    if fps < est {
+        0.7 * est + 0.3 * fps
+    } else {
+        est
+    }
+}
+
+/// How many encoder slots a card gets, each with how many x265 pool threads
+/// and how much memory, from the MiB it has available: normal slots as far
+/// as the memory beyond the reserve allows (at most `max_card_slots`), else
+/// one small slot if that fits, else none. `--card-slots` overrides the
+/// count.
+fn slot_plan(o: &Opts, avail_mb: u64) -> (usize, usize, u64) {
+    let room = avail_mb.saturating_sub(o.reserve_mb);
+    let normal = ((room / o.slot_mb.max(1)) as usize).min(o.max_card_slots);
+    match o.card_slots {
+        Some(n) => (n, o.card_pool, o.slot_mb),
+        None if normal > 0 => (normal, o.card_pool, o.slot_mb),
+        None if room >= o.small_slot_mb => (1, o.small_pool, o.small_slot_mb),
+        None => (0, 0, 0),
+    }
+}
+
+/// The idle card slot that would finish a segment of `frames` soonest, if
+/// that is by `deadline`: the slot's index and its expected finish.
+/// `speed` is a card's estimated frames per second per slot. Idle slots
+/// only: segments arrive every couple of seconds, so a slot that frees up
+/// is refilled almost at once; queueing behind a busy slot (the first
+/// version) turned the spread of card encode times (57 to 85 s for equal
+/// segments) into late segments, cancelled work and a cascade.
+fn place(
+    slots: &[VSlot],
+    frames: u64,
+    speed: impl Fn(u32) -> f64,
+    o: &Opts,
+    now: Instant,
+    deadline: Instant,
+) -> Option<(usize, Instant)> {
+    let mut best: Option<(usize, Instant)> = None;
+    for (k, s) in slots.iter().enumerate() {
+        if s.busy {
+            continue;
+        }
+        let est = o.card_safety * frames as f64 / speed(s.card) + o.card_overhead;
+        let finish = now + Duration::from_secs_f64(est);
+        if best.is_none_or(|b| finish < b.1) {
+            best = Some((k, finish));
+        }
+    }
+    best.filter(|b| b.1 <= deadline)
+}
+
+/// One line of the runner's `done/` listing: `<file> <first line of it>`.
+struct DoneLine<'a> {
+    /// Segment number, from `seg<NNNNN>`.
+    seg: usize,
+    /// `ok`, `fail` or `cancelled`: the file's extension.
+    kind: &'a str,
+    /// The file's stem, `seg<NNNNN>`.
+    name: &'a str,
+    /// The file's first line.
+    rest: &'a str,
+    /// The seconds that line starts with (`ok`, `cancelled`); 0 if none.
+    secs: f64,
+}
+
+fn parse_done_line(line: &str) -> Option<DoneLine<'_>> {
+    let (file, rest) = line.split_once(' ').unwrap_or((line, ""));
+    let (name, kind) = file.rsplit_once('.')?;
+    let seg = name.strip_prefix("seg")?.parse().ok()?;
+    let secs = rest
+        .split_whitespace()
+        .next()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0);
+    Some(DoneLine {
+        seg,
+        kind,
+        name,
+        rest,
+        secs,
+    })
 }
 
 /// A job's directory on a card's disk.
@@ -424,14 +514,7 @@ pub fn transcode(lay: &Layout, phi: Phi, runner: &Path, opts: Opts) -> Result<()
     let cdir = card_job_dir(&job);
     for &c in &opts.cards {
         let avail = phi.mem_available(c)? / (1024 * 1024);
-        let room = avail.saturating_sub(opts.reserve_mb);
-        let normal = ((room / opts.slot_mb.max(1)) as usize).min(opts.max_card_slots);
-        let (n, pool, mb) = match opts.card_slots {
-            Some(n) => (n, opts.card_pool, opts.slot_mb),
-            None if normal > 0 => (normal, opts.card_pool, opts.slot_mb),
-            None if room >= opts.small_slot_mb => (1, opts.small_pool, opts.small_slot_mb),
-            None => (0, 0, 0),
-        };
+        let (n, pool, mb) = slot_plan(&opts, avail);
         println!("== card {c}: {avail} MiB available, {n} slot(s) of {mb} MiB, x265 pools={pool}");
         if n == 0 {
             continue;
@@ -518,29 +601,12 @@ pub fn transcode(lay: &Layout, phi: Phi, runner: &Path, opts: Opts) -> Result<()
         let now = Instant::now();
         let placed = {
             let mut slots = sh.slots.lock().unwrap();
-            let mut best: Option<(usize, Instant)> = None;
-            // Idle slots only. Segments arrive every couple of seconds, so a
-            // slot that frees up is refilled almost at once; queueing behind
-            // a busy slot (the first version) turned encode-time spread
-            // (57 to 85 s) into late segments, cancelled work and a cascade.
-            for (k, s) in slots.iter().enumerate() {
-                if s.busy {
-                    continue;
-                }
-                let est = opts.card_safety * sh.segs[i].frames as f64 / sh.card_speed(s.card)
-                    + opts.card_overhead;
-                let finish = now + Duration::from_secs_f64(est);
-                if best.is_none_or(|b| finish < b.1) {
-                    best = Some((k, finish));
-                }
-            }
-            match best {
-                Some((k, finish)) if finish <= deadline => {
-                    slots[k].busy = true;
-                    Some((k, slots[k].card))
-                }
-                _ => None,
-            }
+            let frames = sh.segs[i].frames;
+            let best = place(&slots, frames, |c| sh.card_speed(c), &opts, now, deadline);
+            best.map(|(k, _)| {
+                slots[k].busy = true;
+                (k, slots[k].card)
+            })
         };
         match placed {
             Some((k, card)) => {
@@ -674,26 +740,19 @@ fn collect(card: u32, sh: &Shared, d: &str, outstanding: &mut Vec<usize>, backup
     };
     let mut remove = Vec::new();
     for line in listing.lines() {
-        let mut parts = line.splitn(2, ' ');
-        let file = parts.next().unwrap_or("");
-        let rest = parts.next().unwrap_or("");
-        let Some((name, kind)) = file.rsplit_once('.') else {
-            continue;
-        };
-        let Some(i) = name
-            .strip_prefix("seg")
-            .and_then(|n| n.parse::<usize>().ok())
+        let Some(DoneLine {
+            seg: i,
+            kind,
+            name,
+            rest,
+            secs,
+        }) = parse_done_line(line)
         else {
             continue;
         };
         if !outstanding.contains(&i) {
             continue;
         }
-        let secs: f64 = rest
-            .split_whitespace()
-            .next()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.0);
         let fps = if secs > 0.0 {
             sh.segs[i].frames as f64 / secs
         } else {
@@ -980,7 +1039,102 @@ fn report(sh: &Shared, wall: f64, total: u64, cards: &[(u32, usize)]) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::{card_job_dir, parse_rate, x265_params, Device};
+    use super::{
+        bounded, card_job_dir, learned, parse_done_line, parse_rate, place, slot_plan, x265_params,
+        Device, Opts, VSlot,
+    };
+    use std::time::{Duration, Instant};
+
+    /// The options with their defaults, as `phifmpeg transcode in out`.
+    fn opts() -> Opts {
+        #[derive(clap::Parser)]
+        struct P {
+            #[command(flatten)]
+            o: Opts,
+        }
+        <P as clap::Parser>::parse_from(["transcode", "in.mkv", "out.mkv"]).o
+    }
+
+    /// Slot sizing on the cards as they were measured: card 1 beside the
+    /// AVX-512 worker (647 MiB) gets the small slot, card 0 with 3.6 GiB
+    /// its five, and 5.1 GiB is still five (the cap).
+    #[test]
+    fn slots_from_free_memory() {
+        let o = opts();
+        assert_eq!(slot_plan(&o, 647), (1, o.small_pool, o.small_slot_mb));
+        assert_eq!(slot_plan(&o, 3600), (5, o.card_pool, o.slot_mb));
+        assert_eq!(slot_plan(&o, 5100), (5, o.card_pool, o.slot_mb));
+        assert_eq!(slot_plan(&o, 1400), (2, o.card_pool, o.slot_mb));
+        assert_eq!(slot_plan(&o, 500), (0, 0, 0));
+        let forced = Opts {
+            card_slots: Some(3),
+            ..opts()
+        };
+        assert_eq!(slot_plan(&forced, 500), (3, o.card_pool, o.slot_mb));
+    }
+
+    #[test]
+    fn placement_takes_the_fastest_idle_slot_that_makes_the_deadline() {
+        let o = opts();
+        let now = Instant::now();
+        let slots = [
+            VSlot {
+                card: 0,
+                busy: true,
+            },
+            VSlot {
+                card: 0,
+                busy: false,
+            },
+            VSlot {
+                card: 1,
+                busy: false,
+            },
+        ];
+        // Card 1 is twice as fast: 120 frames at 4 fps x 1.2 safety + 3 s
+        // overhead = 39 s.
+        let speed = |c: u32| if c == 1 { 4.0 } else { 2.0 };
+        let far = now + Duration::from_secs(150);
+        let (k, finish) = place(&slots, 120, speed, &o, now, far).unwrap();
+        assert_eq!(k, 2);
+        assert!((finish - now).as_secs_f64() - 39.0 < 0.01);
+        // Card 1 busy too: the idle card 0 slot, never the busy one.
+        let mut slots = slots;
+        slots[2].busy = true;
+        assert_eq!(place(&slots, 120, speed, &o, now, far).unwrap().0, 1);
+        // Too close to the deadline for any card: the host takes it.
+        let soon = now + Duration::from_secs(30);
+        assert!(place(&slots, 120, speed, &o, now, soon).is_none());
+        slots[1].busy = true;
+        assert!(place(&slots, 120, speed, &o, now, far).is_none());
+    }
+
+    #[test]
+    fn learning_moves_halfway_and_bounds_softly() {
+        assert_eq!(learned(2.0, 1.0), 1.5);
+        assert!((bounded(2.0, 1.0) - 1.7).abs() < 1e-9);
+        assert_eq!(
+            bounded(2.0, 3.0),
+            2.0,
+            "a bound above the estimate says nothing"
+        );
+    }
+
+    #[test]
+    fn done_listing_lines() {
+        let l = parse_done_line("seg00012.ok 61.250").unwrap();
+        assert_eq!(
+            (l.seg, l.kind, l.name, l.secs),
+            (12, "ok", "seg00012", 61.25)
+        );
+        let l = parse_done_line("seg00003.cancelled 0").unwrap();
+        assert_eq!((l.seg, l.kind, l.secs), (3, "cancelled", 0.0));
+        let l = parse_done_line("seg00007.fail exit status: 137 after 40.1 s").unwrap();
+        assert_eq!((l.seg, l.kind, l.secs), (7, "fail", 0.0));
+        assert_eq!(l.rest, "exit status: 137 after 40.1 s");
+        assert!(parse_done_line("runner.log 1").is_none());
+        assert!(parse_done_line("").is_none());
+    }
 
     #[test]
     fn frame_rates() {

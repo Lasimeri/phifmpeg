@@ -17,8 +17,9 @@ help: ## Show this help
 build: ## Build the host command
 	cargo build
 
-test: ## Run the unit tests (none needs a card)
+test: ## Run the tests, host and card runner (none needs a card)
 	cargo test
+	cargo test $(CARD) -p phifmpeg-card
 
 fmt: ## Check formatting, both workspaces
 	cargo fmt --all -- --check

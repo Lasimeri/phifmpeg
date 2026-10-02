@@ -16,4 +16,5 @@ out, since a `no_std` panic handler cannot link beside `std`).
   transcode`. Started once per job and per card, it encodes the segments
   the host drops into a job directory on the card's disk, a fixed number
   at a time, so the host never holds the card's single control session
-  while an encode runs.
+  while an encode runs. Its protocol is tested on the host
+  ([`runner/tests/protocol.md`](runner/tests/protocol.md)).
