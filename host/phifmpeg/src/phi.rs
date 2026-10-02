@@ -15,7 +15,6 @@ use anyhow::{bail, Context, Result};
 use crate::stack::Stack;
 
 /// Handle on the stack's `phi` command.
-#[derive(Clone)]
 pub struct Phi {
     exe: PathBuf,
 }

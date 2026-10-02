@@ -19,11 +19,11 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-use crate::fetch::{jobs, pristine};
+use crate::fetch::pristine;
 use crate::layout::Layout;
 use crate::pins::Pins;
-use crate::run;
 use crate::stack::Stack;
+use crate::util::{jobs, run};
 
 /// Which build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -43,6 +43,14 @@ impl Variant {
             Variant::Host => "host",
         }
     }
+}
+
+/// Where the card workspace's release build lands, `libphix.a` and the
+/// `phifmpeg-card` runner: in the repository (git-ignored), not under the
+/// build root, because cargo puts a target's output under its workspace.
+/// `transcode` takes the runner from here.
+pub fn card_target(repo: &Path) -> PathBuf {
+    repo.join("card/target/x86_64-knc-linux-musl/release")
 }
 
 /// CMake arguments for x265.
@@ -253,10 +261,9 @@ fn build_phix(
         log,
         "cargo build in card/",
     )?;
-    let dir = card.join("target/x86_64-knc-linux-musl/release");
+    let dir = card_target(repo);
     for built in [dir.join("libphix.a"), dir.join("phifmpeg-card")] {
-        println!("== phi-isa-audit {}", built.display());
-        run(Command::new(stack.isa_audit()?).arg(&built))?;
+        audit(stack, &built)?;
     }
     Ok(dir)
 }
@@ -280,7 +287,7 @@ fn build_x265(
     v: Variant,
     phix: Option<&Path>,
 ) -> Result<()> {
-    let dir = lay.variant(&format!("x265-{}", v.name()));
+    let dir = lay.x265_build(v.name());
     std::fs::create_dir_all(&dir)?;
     let args = x265_args(v, lay, env, phix);
     let flags_file = dir.join("phifmpeg.flags");
@@ -312,9 +319,8 @@ fn build_x265(
     )
 }
 
-/// Build x265 and FFmpeg for one variant (for a card variant, the card
-/// workspace first) and audit the card variants. Returns the unstripped
-/// `ffmpeg_g`.
+/// Build x265 and FFmpeg for one variant (for the card, the card workspace
+/// first) and audit every card binary. Returns the unstripped `ffmpeg_g`.
 pub fn build(stack: &Stack, repo: &Path, lay: &Layout, pins: &Pins, v: Variant) -> Result<PathBuf> {
     pristine("ffmpeg", &pins.ffmpeg, &lay.ffmpeg_src())?;
     pristine("x265", &pins.x265, &lay.x265_src())?;
@@ -324,7 +330,7 @@ pub fn build(stack: &Stack, repo: &Path, lay: &Layout, pins: &Pins, v: Variant) 
             lay.tools().display()
         );
     }
-    // Card variants build with the stack's environment (its PATH, and
+    // The card variant builds with the stack's environment (its PATH, and
     // CC=knc-cc, which CMake would honour); the host variant must not.
     let host = v == Variant::Host;
     let mut env: HashMap<String, String> = if host {
@@ -349,7 +355,7 @@ pub fn build(stack: &Stack, repo: &Path, lay: &Layout, pins: &Pins, v: Variant) 
         // ones and let the build link them again.
         let lib = dir.join("libphix.a");
         let ff = lay.variant(v.name());
-        let x = lay.variant(&format!("x265-{}", v.name()));
+        let x = lay.x265_build(v.name());
         for out in ["ffmpeg_g", "ffmpeg", "ffprobe_g", "ffprobe"]
             .iter()
             .map(|n| ff.join(n))
@@ -400,17 +406,14 @@ pub fn build(stack: &Stack, repo: &Path, lay: &Layout, pins: &Pins, v: Variant) 
         return Ok(bin);
     }
     audit(stack, &bin)?;
-    audit(
-        stack,
-        &lay.variant(&format!("x265-{}", v.name())).join("x265"),
-    )?;
+    audit(stack, &lay.x265_build(v.name()).join("x265"))?;
     Ok(bin)
 }
 
 /// Run the stack's ISA audit on a card binary; any instruction the card
 /// cannot execute fails the build. (The host variant is not audited: the
 /// host executes everything.)
-pub fn audit(stack: &Stack, bin: &Path) -> Result<()> {
+fn audit(stack: &Stack, bin: &Path) -> Result<()> {
     println!("== phi-isa-audit {}", bin.display());
     run(Command::new(stack.isa_audit()?).arg(bin))
 }

@@ -17,11 +17,12 @@ mod pins;
 mod prof;
 mod stack;
 mod transcode;
+mod util;
 
 use std::path::PathBuf;
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use ffbuild::Variant;
@@ -39,12 +40,21 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// The subcommands, in the order a fresh checkout uses them.
 #[derive(Subcommand)]
 enum Cmd {
     /// Show where the stack, its toolchain and the build root are.
     Stack,
     /// Fetch the pinned FFmpeg and x265 and build the pinned nasm.
     Fetch,
+    /// Build x265 and FFmpeg (build flags only): for the card, with the card
+    /// workspace, audited; or for the host.
+    Build {
+        /// `c` (the cards: no assembly, audited clean) or `host` (native, all
+        /// SIMD).
+        #[arg(long, value_enum, default_value = "c")]
+        variant: Variant,
+    },
     /// Real-time HEVC transcode shared between the cards and the host.
     Transcode(transcode::Opts),
     /// Map card profiler samples (PHIX_PROF) to functions.
@@ -57,14 +67,6 @@ enum Cmd {
         #[arg(long, default_value_t = 30)]
         top: usize,
     },
-    /// Build x265 and FFmpeg (build flags only): for the card, with the card
-    /// workspace, audited; or for the host.
-    Build {
-        /// `c` (the cards: no assembly, audited clean) or `host` (native, all
-        /// SIMD).
-        #[arg(long, value_enum, default_value = "c")]
-        variant: Variant,
-    },
 }
 
 /// This repository's root (the crate is at host/phifmpeg).
@@ -73,17 +75,6 @@ fn repo_root() -> PathBuf {
         .join("../..")
         .canonicalize()
         .expect("repository root")
-}
-
-/// Run a command, failing on a non-zero exit.
-pub(crate) fn run(cmd: &mut Command) -> Result<()> {
-    let status = cmd
-        .status()
-        .map_err(|e| anyhow::anyhow!("running {cmd:?}: {e}"))?;
-    if !status.success() {
-        bail!("{cmd:?} exited with {status}");
-    }
-    Ok(())
 }
 
 fn main() -> ExitCode {
@@ -114,17 +105,17 @@ fn real_main() -> Result<()> {
             println!("ffmpeg      {} at {}", pins.ffmpeg.tag, pins.ffmpeg.commit);
         }
         Cmd::Fetch => fetch::fetch(&lay, &pins)?,
-        Cmd::Transcode(o) => {
-            let s = Stack::find(&repo)?;
-            let runner = repo.join("card/target/x86_64-knc-linux-musl/release/phifmpeg-card");
-            transcode::transcode(&lay, phi::Phi::new(&s), &runner, o)?;
-        }
-        Cmd::Prof { elf, samples, top } => prof::report(&elf, &samples, top)?,
         Cmd::Build { variant } => {
             let s = Stack::find(&repo)?;
             let bin = ffbuild::build(&s, &repo, &lay, &pins, variant)?;
             println!("== built {}", bin.display());
         }
+        Cmd::Transcode(o) => {
+            let s = Stack::find(&repo)?;
+            let runner = ffbuild::card_target(&repo).join("phifmpeg-card");
+            transcode::transcode(&lay, phi::Phi::new(&s), &runner, o)?;
+        }
+        Cmd::Prof { elf, samples, top } => prof::report(&elf, &samples, top)?,
     }
     Ok(())
 }

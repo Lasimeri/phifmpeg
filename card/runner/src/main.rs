@@ -65,7 +65,10 @@ fn main() -> ExitCode {
     }
     // Inherited by every encoder.
     let _ = fs::write("/proc/self/oom_score_adj", "1000");
-    eprintln!("phifmpeg-card: serving {} with {slots} slot(s)", dir.display());
+    eprintln!(
+        "phifmpeg-card: serving {} with {slots} slot(s)",
+        dir.display()
+    );
 
     let mut running: Vec<Running> = Vec::new();
     loop {
@@ -91,7 +94,10 @@ fn main() -> ExitCode {
                 let _ = r.child.kill();
                 let _ = r.child.wait();
                 let secs = r.started.elapsed().as_secs_f64();
-                let _ = fs::write(dir.join(format!("done/{name}.cancelled")), format!("{secs:.3}\n"));
+                let _ = fs::write(
+                    dir.join(format!("done/{name}.cancelled")),
+                    format!("{secs:.3}\n"),
+                );
                 cleanup(&dir, &name);
             } else if fs::remove_file(dir.join(format!("in/{name}.mkv"))).is_ok() {
                 let _ = fs::write(dir.join(format!("done/{name}.cancelled")), "0\n");
@@ -124,7 +130,10 @@ fn main() -> ExitCode {
                 }
             }
         }
-        if dir.join("stop").exists() && running.is_empty() && listing(&dir.join("in"), ".mkv").is_empty() {
+        if dir.join("stop").exists()
+            && running.is_empty()
+            && listing(&dir.join("in"), ".mkv").is_empty()
+        {
             eprintln!("phifmpeg-card: stop");
             return ExitCode::SUCCESS;
         }

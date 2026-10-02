@@ -18,7 +18,9 @@ configure.
    for the stack's target spec, with `RUSTC_BOOTSTRAP=1`, the stack's LLVM
    library for rustc first on `LD_LIBRARY_PATH`, and `knc-cc` as the
    target's linker. Always clean, because cargo's fingerprints do not cover
-   that library (the stack's ADR 0007). Both products are audited and must
+   that library (the stack's ADR 0007). The output lands in
+   `card/target/x86_64-knc-linux-musl/release` (`card_target`, where
+   `transcode` also finds the runner). Both products are audited and must
    be clean: `libphix.a` and `phifmpeg-card`. Log: `<build>/phix-build.log`.
    Then any `ffmpeg_g`, `ffmpeg`, `ffprobe_g`, `ffprobe` or x265 CLI older
    than the new `libphix.a` is deleted: neither FFmpeg's Makefile nor
