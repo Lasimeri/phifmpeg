@@ -3,7 +3,7 @@
 `make docs-check`, the first step of `make check`. The same script in every
 repository of the family (Intel-Phi-3120A, Intel-Phi-AVX512, Intel-Phi-Jev,
 Mechanical-Jev, phifmpeg), line for line apart from `code_dirs`, the places that hold code; here
-`host`, `card` and `scripts`. Three rules:
+`host`, `card`, `scripts` and `.claude` (the web session hook). Three rules:
 
 1. **Sibling documentation.** Every `*.rs`, `*.c`, `*.h`, `*.S`, `*.sh`,
    `*.json`, `*.config` under `code_dirs` has a `*.md` with the same stem
