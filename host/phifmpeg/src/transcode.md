@@ -30,9 +30,19 @@ every segment they can finish in time, the host does the rest.
    unfinished at the last moment the host could make the deadline. The
    first result wins; a winning host copy cancels the card's. A card
    segment that fails (for example its encoder ended by the card's
-   out-of-memory killer, which `oom_score_adj` 1000 points at it first)
-   goes to the host at once.
-6. **Assembly.** Segments are Matroska (they carry timestamps; raw HEVC
+   out-of-memory killer, which `oom_score_adj` 1000 points at it first),
+   or whose result cannot be fetched or submitted, goes to the host at
+   once. Every one of these paths claims the segment's single host copy
+   (`claim_backup`), so two host slots never encode one segment into the
+   same file at once. A card result that arrives after the host's copy won
+   is not fetched; its time only bounds the card's speed estimate.
+6. **Failure.** The host is the last resort: it tries a segment twice
+   (`HOST_ATTEMPTS`), and if both fail the transcode stops, cancels what
+   the cards are on and returns the error, instead of waiting for a segment
+   nothing will finish. Options that would hang or panic are rejected
+   before anything starts (`check_opts`): no host slot, a speed, latency or
+   segment length that is not a positive number, a negative margin.
+7. **Assembly.** Segments are Matroska (they carry timestamps; raw HEVC
    with B-frames has none to copy), joined with FFmpeg's concat demuxer
    by stream copy, with the input's audio mapped through. The output's
    frames are counted.
@@ -71,7 +81,8 @@ The decisions are pure functions with unit tests (`cargo test`):
 `slot_plan` (slots from a card's free memory, with the measured cases: 647
 MiB gives the small slot, 3.6 GiB five), `place` (the fastest idle slot
 that makes the deadline, else none), `learned` and `bounded` (the speed
-estimate's two updates), `parse_done_line` (the runner's `done/` listing)
+estimate's two updates), `claim_backup` (one host copy per segment, from
+any path), `check_opts`, `parse_done_line` (the runner's `done/` listing)
 and `x265_params`. The runner's side of the protocol is tested on the host
 in [`card/runner/tests/protocol.md`](../../../card/runner/tests/protocol.md).
 The threads, the `phi` sessions and the encoders themselves are exercised
@@ -81,7 +92,8 @@ only by a real transcode.
 
 Per segment (written to `segments.log` in the job directory): frames,
 device, encode seconds, completion time and slack to the deadline.
-Printed: deadline misses, host backups (and how many won), card attempts
+Printed: deadline misses, host backups (the monitor's and those after a
+failed card attempt, and how many won), card attempts
 by outcome with the slot-seconds they cost, final speed estimates, and
 each device's share of the frames.
 
