@@ -16,7 +16,8 @@ sections are the same in every repository of the family (see
   configure, x265's CMake), link flags, or runtime options they already
   have (FFmpeg's `-threads`, x265's `pools`, `frame-threads`).
 - **Shell** only for `scripts/check-docs.sh`, the family's shared
-  repository-hygiene script.
+  repository-hygiene script, and `.claude/hooks/session-start.sh`, which
+  warms the cargo caches for Claude Code on the web.
 - **Never Python or JavaScript** for anything here.
 
 ## Documentation
