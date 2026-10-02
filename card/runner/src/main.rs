@@ -23,6 +23,10 @@
 //! | `cancel/<name>` | host | stop this segment (running or waiting) |
 //! | `stop` | host | exit once nothing is running or waiting |
 //!
+//! The `.ok`, `.fail` or `.cancelled` marker is always a segment's last
+//! write, and appears whole (renamed from a dot name): once it exists, the
+//! segment's `run/` files and `cancel/` request are gone.
+//!
 //! Segments are taken oldest name first, at most `<slots>` at a time. The
 //! runner sets its own `oom_score_adj` to 1000 before starting anything, so
 //! it and every encoder it starts go before any resident service when the
@@ -87,22 +91,21 @@ fn main() -> ExitCode {
                 }
             }
         }
-        // Cancellations, running or waiting.
+        // Cancellations, running or waiting. The request is consumed and the
+        // working files removed before the marker is published, so that a
+        // reader who sees the marker sees nothing else left of the segment.
         for name in listing(&dir.join("cancel"), "") {
+            let _ = fs::remove_file(dir.join("cancel").join(&name));
             if let Some(k) = running.iter().position(|r| r.name == name) {
                 let mut r = running.swap_remove(k);
                 let _ = r.child.kill();
                 let _ = r.child.wait();
                 let secs = r.started.elapsed().as_secs_f64();
-                let _ = fs::write(
-                    dir.join(format!("done/{name}.cancelled")),
-                    format!("{secs:.3}\n"),
-                );
                 cleanup(&dir, &name);
+                publish(&dir, &name, "cancelled", &format!("{secs:.3}\n"));
             } else if fs::remove_file(dir.join(format!("in/{name}.mkv"))).is_ok() {
-                let _ = fs::write(dir.join(format!("done/{name}.cancelled")), "0\n");
+                publish(&dir, &name, "cancelled", "0\n");
             }
-            let _ = fs::remove_file(dir.join("cancel").join(&name));
         }
         // New work, oldest first.
         let waiting = listing(&dir.join("in"), ".mkv");
@@ -122,11 +125,13 @@ fn main() -> ExitCode {
                     started: Instant::now(),
                 }),
                 Err(e) => {
-                    let _ = fs::write(
-                        dir.join(format!("done/{name}.fail")),
-                        format!("could not start {program}: {e}\n"),
-                    );
                     cleanup(&dir, name);
+                    publish(
+                        &dir,
+                        name,
+                        "fail",
+                        &format!("could not start {program}: {e}\n"),
+                    );
                 }
             }
         }
@@ -177,23 +182,34 @@ fn start(dir: &Path, name: &str, program: &str, template: &[String]) -> std::io:
         .spawn()
 }
 
-/// Publish a finished encoder's result.
+/// Publish a finished encoder's result: the output moved into `done/`, the
+/// working files removed, and only then the marker the host polls for.
 fn finish(dir: &Path, r: &Running, ok: bool, status: &str) {
     let secs = r.started.elapsed().as_secs_f64();
     let name = &r.name;
     let out = dir.join(format!("run/{name}.out.mkv"));
-    if ok && out.is_file() && fs::rename(&out, dir.join(format!("done/{name}.mkv"))).is_ok() {
-        // Written last: the host fetches the segment only after this exists.
-        let _ = fs::write(dir.join(format!("done/{name}.ok")), format!("{secs:.3}\n"));
-    } else {
-        let log = fs::read(dir.join(format!("run/{name}.log"))).unwrap_or_default();
-        let tail = String::from_utf8_lossy(&log[log.len().saturating_sub(400)..]).into_owned();
-        let _ = fs::write(
-            dir.join(format!("done/{name}.fail")),
-            format!("{status} after {secs:.1} s\n{tail}"),
-        );
-    }
+    let (kind, text) =
+        if ok && out.is_file() && fs::rename(&out, dir.join(format!("done/{name}.mkv"))).is_ok() {
+            ("ok", format!("{secs:.3}\n"))
+        } else {
+            // Read before cleanup removes it.
+            let log = fs::read(dir.join(format!("run/{name}.log"))).unwrap_or_default();
+            let tail = String::from_utf8_lossy(&log[log.len().saturating_sub(400)..]).into_owned();
+            ("fail", format!("{status} after {secs:.1} s\n{tail}"))
+        };
     cleanup(dir, name);
+    publish(dir, name, kind, &text);
+}
+
+/// Write `done/<name>.<kind>`: always a segment's last write, so a reader
+/// who sees it finds the segment's output (for `ok`) complete and its
+/// working files and cancel request gone. Written under a dot name and
+/// renamed, so it never appears empty (the host reads its first line).
+fn publish(dir: &Path, name: &str, kind: &str, text: &str) {
+    let tmp = dir.join(format!("done/.{name}.{kind}.tmp"));
+    if fs::write(&tmp, text).is_ok() {
+        let _ = fs::rename(&tmp, dir.join(format!("done/{name}.{kind}")));
+    }
 }
 
 /// Remove a segment's working files.

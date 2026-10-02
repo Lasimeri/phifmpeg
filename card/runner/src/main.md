@@ -17,6 +17,15 @@ followed by `done/<name>.ok` (encode seconds), or `done/<name>.fail`
 (status and log tail), or `done/<name>.cancelled` after a
 `cancel/<name>`. `stop` ends it once idle.
 
+The marker is the segment's last write and appears whole: the `cancel/`
+request is consumed and the `run/` files removed first, then the marker
+is written under a dot name and renamed into place. Until 2026-10-02 it was
+written first and in place, so a reader could find it empty (the host
+would have parsed zero seconds) or beside leftover working files; the
+host-side protocol test caught the second intermittently. Checked with
+`strace` on the runner's file calls: the marker's rename now follows every
+`unlink` of that segment.
+
 The runner writes 1000 to its own `oom_score_adj` before starting
 anything, so it and its encoders are the out-of-memory killer's first
 choice, ahead of any resident service on the card.
