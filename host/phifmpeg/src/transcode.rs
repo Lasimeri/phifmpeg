@@ -51,6 +51,9 @@ const CARD_DECODE_THREADS: usize = 2;
 const CARD_FRAME_THREADS: usize = 2;
 /// FFmpeg decode threads per host slot.
 const HOST_DECODE_THREADS: usize = 4;
+/// Times the host tries a segment before the transcode fails: the host is
+/// the last resort, so a segment it cannot encode ends the run.
+const HOST_ATTEMPTS: usize = 2;
 
 /// Options for one transcode.
 #[derive(clap::Args, Clone)]
@@ -225,8 +228,22 @@ struct Attempt {
 struct State {
     /// The card it was given to, if any.
     card: Option<u32>,
+    /// The host has been given a copy (the deadline monitor's backup, or
+    /// the card attempt failed). At most one per segment.
     backup: bool,
     done: Option<Done>,
+}
+
+/// Claim a segment's one host copy: true if the caller should send it,
+/// false if it is finished or a copy was already sent. Every path that
+/// hands a card segment to the host goes through this, so two host slots
+/// never encode the same segment into the same file at once.
+fn claim_backup(s: &mut State) -> bool {
+    if s.done.is_some() || s.backup {
+        return false;
+    }
+    s.backup = true;
+    true
 }
 
 /// A card slot as the scheduler sees it: the runner on that card encodes
@@ -252,6 +269,8 @@ struct Shared {
     state: Mutex<Vec<State>>,
     changed: Condvar,
     finished: AtomicBool,
+    /// Why the transcode cannot finish, once something has made it so.
+    fatal: Mutex<Option<String>>,
     card_fps: Mutex<HashMap<u32, f64>>,
     host_fps: Mutex<f64>,
     attempts: Mutex<Vec<Attempt>>,
@@ -321,6 +340,54 @@ impl Shared {
     fn card_dir(&self) -> String {
         card_job_dir(&self.job)
     }
+    /// Give the host a copy of card segment `i`, unless it is finished or
+    /// already has one.
+    fn request_backup(&self, i: usize, backup: &Sender<usize>) {
+        if claim_backup(&mut self.state.lock().unwrap()[i]) {
+            backup.send(i).ok();
+        }
+    }
+    /// The transcode cannot finish: record why (the first reason wins) and
+    /// wake the waiter.
+    fn fail(&self, why: String) {
+        self.fatal.lock().unwrap().get_or_insert(why);
+        // Under the state lock: the waiter checks `fatal` holding it, so
+        // the wakeup cannot fall between its check and its wait.
+        let _st = self.state.lock().unwrap();
+        self.changed.notify_all();
+    }
+    fn fatal(&self) -> Option<String> {
+        self.fatal.lock().unwrap().clone()
+    }
+}
+
+/// Reject options that would hang the transcode or panic in it: without a
+/// host slot a segment no card can take is never encoded; a speed of zero
+/// or a non-finite number makes an estimate infinite.
+fn check_opts(o: &Opts) -> Result<()> {
+    if o.host_slots == 0 {
+        bail!("--host-slots must be at least 1: the host takes what the cards cannot");
+    }
+    for (name, v) in [
+        ("--card-fps", o.card_fps),
+        ("--host-fps", o.host_fps),
+        ("--segment-seconds", o.segment_seconds),
+        ("--latency", o.latency),
+        ("--card-safety", o.card_safety),
+    ] {
+        if !(v.is_finite() && v > 0.0) {
+            bail!("{name} must be a positive number, not {v}");
+        }
+    }
+    for (name, v) in [("--card-overhead", o.card_overhead), ("--margin", o.margin)] {
+        if !(v.is_finite() && v >= 0.0) {
+            bail!("{name} must be zero or more, not {v}");
+        }
+    }
+    if o.slot_mb == 0 {
+        bail!("--slot-mb must be at least 1");
+    }
+    Ok(())
 }
 
 /// A speed estimate after a finished segment measured `fps`: halfway there.
@@ -436,6 +503,7 @@ fn x265_params(pool: usize, frame_threads: Option<usize>) -> String {
 
 /// Run one transcode.
 pub fn transcode(lay: &Layout, phi: Phi, runner: &Path, opts: Opts) -> Result<()> {
+    check_opts(&opts)?;
     let host_ffmpeg = lay.variant("host").join("ffmpeg");
     let host_ffprobe = lay.variant("host").join("ffprobe");
     let card_ffmpeg = lay.variant("c").join("ffmpeg");
@@ -503,6 +571,9 @@ pub fn transcode(lay: &Layout, phi: Phi, runner: &Path, opts: Opts) -> Result<()
             end: t,
         });
     }
+    if segs.is_empty() {
+        bail!("splitting {} gave no segments", opts.input.display());
+    }
     let total: u64 = segs.iter().map(|s| s.frames).sum();
     println!(
         "== {} segments, {total} frames, {t:.1} s of video",
@@ -563,6 +634,7 @@ pub fn transcode(lay: &Layout, phi: Phi, runner: &Path, opts: Opts) -> Result<()
         state: Mutex::new(vec![State::default(); n]),
         changed: Condvar::new(),
         finished: AtomicBool::new(false),
+        fatal: Mutex::new(None),
         host_ffmpeg: host_ffmpeg.clone(),
         phi,
     });
@@ -592,6 +664,9 @@ pub fn transcode(lay: &Layout, phi: Phi, runner: &Path, opts: Opts) -> Result<()
     // Segments arrive at the video's own pace: a live segment exists once
     // its last frame has arrived.
     for i in 0..n {
+        if sh.fatal().is_some() {
+            break;
+        }
         let arrival = sh.t0 + Duration::from_secs_f64(sh.segs[i].end);
         let now = Instant::now();
         if arrival > now {
@@ -623,18 +698,22 @@ pub fn transcode(lay: &Layout, phi: Phi, runner: &Path, opts: Opts) -> Result<()
     }
     drop(host_tx);
 
-    // Wait for every segment.
+    // Wait for every segment, or for a reason it cannot happen.
     {
         let mut st = sh.state.lock().unwrap();
-        while st.iter().any(|s| s.done.is_none()) {
+        while sh.fatal().is_none() && st.iter().any(|s| s.done.is_none()) {
             st = sh.changed.wait(st).unwrap();
         }
     }
     let wall = sh.t0.elapsed().as_secs_f64();
+    // Stops the workers; the card agents cancel what their cards are on.
     sh.finished.store(true, Ordering::SeqCst);
     sh.card_tx.lock().unwrap().clear();
     for h in handles {
         let _ = h.join();
+    }
+    if let Some(why) = sh.fatal() {
+        bail!("transcode stopped: {why}");
     }
 
     report(&sh, wall, total, &card_slots)?;
@@ -695,7 +774,7 @@ fn card_agent(card: u32, sh: Arc<Shared>, rx: Receiver<CardMsg>, backup: Sender<
                         Err(e) => {
                             eprintln!("   card {card}: could not submit segment {i}: {e:#}");
                             sh.release_slot(i);
-                            backup.send(i).ok();
+                            sh.request_backup(i, &backup);
                         }
                     }
                 }
@@ -758,25 +837,32 @@ fn collect(card: u32, sh: &Shared, d: &str, outstanding: &mut Vec<usize>, backup
         } else {
             0.0
         };
+        // Finished after the host's backup: the card needed `secs`, so
+        // `fps` bounds its speed. Nothing to fetch.
+        let too_late = |sh: &Shared| {
+            if fps > 0.0 {
+                sh.learn_card_bound(card, fps);
+            }
+            Outcome::FinishedTooLate
+        };
         let outcome = match kind {
+            "ok" if sh.is_done(i) => too_late(sh),
             "ok" => {
                 let out = sh.dir.join(format!("out/seg{i:05}.card{card}.mkv"));
                 match sh.phi.get(card, &format!("{d}/done/{name}.mkv"), &out) {
                     Ok(()) => {
                         if sh.finish(i, Device::Card(card), secs, out) {
-                            sh.learn_card(card, fps);
+                            if fps > 0.0 {
+                                sh.learn_card(card, fps);
+                            }
                             Outcome::Finished
                         } else {
-                            // Finished after the host's backup: the card
-                            // needed `secs`, so `fps` bounds its speed.
-                            sh.learn_card_bound(card, fps);
-                            Outcome::FinishedTooLate
+                            too_late(sh)
                         }
                     }
                     Err(_) => {
-                        if !sh.is_done(i) {
-                            backup.send(i).ok();
-                        }
+                        sh.release_slot(i);
+                        sh.request_backup(i, backup);
                         Outcome::FetchFailed
                     }
                 }
@@ -789,10 +875,8 @@ fn collect(card: u32, sh: &Shared, d: &str, outstanding: &mut Vec<usize>, backup
             }
             _ => {
                 eprintln!("   card {card}: segment {i} failed on the card: {rest}");
-                if !sh.is_done(i) {
-                    sh.release_slot(i);
-                    backup.send(i).ok();
-                }
+                sh.release_slot(i);
+                sh.request_backup(i, backup);
                 Outcome::Failed
             }
         };
@@ -834,29 +918,40 @@ fn host_worker(
                 }
             },
         };
-        if sh.is_done(i) {
-            continue;
-        }
-        let t = Instant::now();
         let out = sh.dir.join(format!("out/seg{i:05}.host.mkv"));
-        match host_encode(&sh, i, &out) {
-            Ok(()) => {
-                let secs = t.elapsed().as_secs_f64();
-                if sh.finish(i, Device::Host(slot), secs, out) {
-                    let fps = sh.segs[i].frames as f64 / secs;
-                    let mut h = sh.host_fps.lock().unwrap();
-                    *h = 0.5 * *h + 0.5 * fps;
-                    drop(h);
-                    // A backup that won: stop the card's copy.
-                    let card = sh.state.lock().unwrap()[i].card;
-                    if let Some(c) = card {
-                        if let Some(tx) = sh.card_tx.lock().unwrap().get(&c) {
-                            tx.send(CardMsg::Cancel(i)).ok();
+        for attempt in 1..=HOST_ATTEMPTS {
+            if sh.is_done(i) || sh.finished.load(Ordering::SeqCst) {
+                break;
+            }
+            let t = Instant::now();
+            match host_encode(&sh, i, &out) {
+                Ok(()) => {
+                    let secs = t.elapsed().as_secs_f64();
+                    if sh.finish(i, Device::Host(slot), secs, out.clone()) {
+                        let fps = sh.segs[i].frames as f64 / secs;
+                        let mut h = sh.host_fps.lock().unwrap();
+                        *h = learned(*h, fps);
+                        drop(h);
+                        // A backup that won: stop the card's copy.
+                        let card = sh.state.lock().unwrap()[i].card;
+                        if let Some(c) = card {
+                            if let Some(tx) = sh.card_tx.lock().unwrap().get(&c) {
+                                tx.send(CardMsg::Cancel(i)).ok();
+                            }
                         }
+                    }
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("   host {slot}: segment {i} failed (attempt {attempt}): {e:#}");
+                    if attempt == HOST_ATTEMPTS {
+                        sh.fail(format!(
+                            "the host could not encode segment {i} ({}): {e:#}",
+                            sh.segs[i].input.display()
+                        ));
                     }
                 }
             }
-            Err(e) => eprintln!("   host {slot}: segment {i} failed: {e:#}"),
         }
     }
 }
@@ -897,10 +992,10 @@ fn monitor(sh: Arc<Shared>, backup: Sender<usize>) {
                 if s.card.is_none() || s.done.is_some() || s.backup {
                     continue;
                 }
-                let last =
-                    sh.deadline(i) - Duration::from_secs_f64(sh.host_est(i) + sh.opts.margin);
-                if now >= last {
-                    s.backup = true;
+                let last = sh
+                    .deadline(i)
+                    .checked_sub(Duration::from_secs_f64(sh.host_est(i) + sh.opts.margin));
+                if last.is_none_or(|l| now >= l) && claim_backup(s) {
                     send.push(i);
                 }
             }
@@ -1040,9 +1135,10 @@ fn report(sh: &Shared, wall: f64, total: u64, cards: &[(u32, usize)]) -> Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded, card_job_dir, learned, parse_done_line, parse_rate, place, slot_plan, x265_params,
-        Device, Opts, VSlot,
+        bounded, card_job_dir, check_opts, claim_backup, learned, parse_done_line, parse_rate,
+        place, slot_plan, x265_params, Device, Done, Opts, State, VSlot,
     };
+    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
     /// The options with their defaults, as `phifmpeg transcode in out`.
@@ -1168,5 +1264,78 @@ mod tests {
         assert_eq!(Device::Host(1).group(), "host");
         assert_eq!(Device::Card(0).group(), "card 0");
         assert!(Device::Host(0).is_host() && !Device::Card(0).is_host());
+    }
+
+    /// One host copy per segment, whoever asks: the monitor at the
+    /// deadline, a failed card attempt, a failed fetch. A second request
+    /// used to start a second host encode writing the same file.
+    #[test]
+    fn a_segment_gets_one_backup() {
+        let mut s = State {
+            card: Some(0),
+            ..State::default()
+        };
+        assert!(claim_backup(&mut s));
+        assert!(s.backup);
+        assert!(!claim_backup(&mut s), "a second request sends nothing");
+        let mut finished = State {
+            card: Some(1),
+            done: Some(Done {
+                by: Device::Card(1),
+                secs: 60.0,
+                at: 70.0,
+                out: PathBuf::from("seg.mkv"),
+            }),
+            ..State::default()
+        };
+        assert!(
+            !claim_backup(&mut finished),
+            "a finished segment needs none"
+        );
+        assert!(!finished.backup);
+    }
+
+    #[test]
+    fn options_that_would_hang_or_panic() {
+        assert!(check_opts(&opts()).is_ok());
+        let bad = [
+            Opts {
+                host_slots: 0,
+                ..opts()
+            },
+            Opts {
+                card_fps: 0.0,
+                ..opts()
+            },
+            Opts {
+                host_fps: f64::NAN,
+                ..opts()
+            },
+            Opts {
+                latency: -1.0,
+                ..opts()
+            },
+            Opts {
+                segment_seconds: 0.0,
+                ..opts()
+            },
+            Opts {
+                margin: f64::INFINITY,
+                ..opts()
+            },
+            Opts {
+                slot_mb: 0,
+                ..opts()
+            },
+        ];
+        for o in &bad {
+            assert!(check_opts(o).is_err());
+        }
+        let zero_margin = Opts {
+            margin: 0.0,
+            card_overhead: 0.0,
+            ..opts()
+        };
+        assert!(check_opts(&zero_margin).is_ok());
     }
 }
